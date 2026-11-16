@@ -1,0 +1,50 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '17 1 * * *' # 09:17 Asia/Shanghai
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency: sync-upstream
+
+jobs:
+  sync:
+    if: github.repository == 'SteflerJiang/AIHOT' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check for upstream commits
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ahead=$(gh api "repos/$GITHUB_REPOSITORY/compare/SteflerJiang:main...KKKKhazix:main?per_page=1" --jq '.ahead_by')
+          echo "Upstream has $ahead commit(s) to sync."
+          echo "ahead=$ahead" >> "$GITHUB_OUTPUT"
+
+      - name: Open a pull request if needed
+        if: steps.compare.outputs.ahead != '0'
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo '::error::Set UPSTREAM_SYNC_TOKEN to a fine-grained PAT with Pull requests: Read and write for SteflerJiang/AIHOT.'
+            exit 1
+          fi
+
+          pulls="repos/$GITHUB_REPOSITORY/pulls"
+          existing=$(gh api --method GET "$pulls" -f state=open -f base=main -f head=KKKKhazix:main --jq '.[0].html_url // empty')
+          if [[ -n "$existing" ]]; then
+            echo "Sync pull request already open: $existing"
+            exit 0
+          fi
+
+          gh api --method POST "$pulls" \
+            -f base=main -f head=KKKKhazix:main \
+            -f title='Sync upstream AIHOT' \
+            -f body='Sync KKKKhazix/AIHOT main into this fork. Review the changes and wait for Check to pass, then use Create a merge commit to preserve upstream history.' \
+            -F maintainer_can_modify=false \
+            --jq '.html_url'
