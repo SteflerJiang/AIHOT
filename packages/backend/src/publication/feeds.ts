@@ -12,7 +12,7 @@ import { withCover, type Cover } from "../content/cover.ts";
 import { feedIssues, type FeedIssue, type ReportKind } from "./reports.ts";
 import { textToHtml } from "../content/sanitize.ts";
 import { xArticleBody } from "../content/posts.ts";
-import { publicCategoryCondition, exportTranslation, xView, type ItemRow } from "./items.ts";
+import { PUBLIC_ITEM_COLUMNS, publicCategoryCondition, exportTranslation, xView, type ItemRow } from "./items.ts";
 import { publicSourceName } from "./rules.ts";
 import { SELECTION } from "@aihot/industry/selection";
 import { browsedCondition, seatedCondition } from "./scope.ts";
@@ -158,14 +158,14 @@ export async function itemFeed(kind: ItemFeedKind, category: PublicApiCategoryKe
       SELECT p.article_id FROM publications p WHERE ${scope}
       ORDER BY coalesce(p.published_at, p.discovered_at) DESC, p.article_id DESC LIMIT 50
     )
-    SELECT p.article_id AS id, p.title, p.summary, p.url, p.category, p.published_at, s.name AS source_name
+    SELECT ${PUBLIC_ITEM_COLUMNS}
       ${includeContent ? sql`, p.channel, p.syndicate, a.language, a.x_post, a.x_article,
         CASE WHEN p.channel = 'x' THEN tr.body_text END AS zh_text, qt.text_zh AS quoted_zh,
         a.body_text, a.body_html, a.cover, tr.body_html AS tr_html, tr.complete AS tr_complete` : sql``}
     FROM page JOIN publications p ON p.article_id = page.article_id JOIN sources s ON s.id = p.source_id
     ${includeContent ? sql`LEFT JOIN articles a ON a.id = p.article_id AND p.syndicate
       LEFT JOIN translations tr ON tr.article_id = p.article_id AND tr.lang = 'zh' AND tr.revision >= a.revision
-      LEFT JOIN quote_translations qt ON p.channel = 'x' AND qt.tweet_id = substring(a.x_post->'quoted'->>'url' from '/status/([0-9]+)')` : sql``}
+      LEFT JOIN quote_translations qt ON p.channel = 'x' AND qt.tweet_id = coalesce(a.x_post->'quoted'->>'tweetId', substring(a.x_post->'quoted'->>'url' from '/status/([0-9]+)'))` : sql``}
     ORDER BY coalesce(p.published_at, p.discovered_at) DESC, p.article_id DESC`;
   const m = feedMeta(kind);
   let meta = { title: m.title, description: m.description, homePath: m.homePath, selfPath: m.path, ttl: m.pollHintMinutes };
