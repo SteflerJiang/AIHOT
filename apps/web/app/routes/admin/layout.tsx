@@ -1,12 +1,13 @@
 import { Suspense } from "react";
 import { ADMIN, SITE } from "@aihot/site";
-import { Await, data, NavLink, Outlet, useLocation, useNavigation, type ShouldRevalidateFunction } from "react-router";
+import { Await, data, Outlet, useLocation, useNavigation, type ShouldRevalidateFunction } from "react-router";
 import type { Route } from "./+types/layout";
 import { RingMark } from "@aihot/site/brand/Logo.tsx";
 import { NavigationProgress } from "../../components/shell/Chrome";
 import type { AdminMe, AdminNavCounts } from "@aihot/contracts/admin";
 import { Toaster } from "../../features/admin/toast";
 import { adminGet } from "../../lib/admin.server";
+import { NavLink } from "../../lib/link";
 
 interface AdminNavEntry {
   to: string;
@@ -97,7 +98,7 @@ export default function AdminLayout({ loaderData }: Route.ComponentProps) {
         <nav className="scrollbar-thin flex-1 space-y-4 overflow-y-auto">
           {groups.map((g) => (
             <div key={g.group}>
-              <div className="mb-1 px-3 text-[11.5px] font-medium tracking-wide text-ink-4">{g.group}</div>
+              <div className="mb-1 px-3 text-ui-caption-md font-medium tracking-wide text-ink-4">{g.group}</div>
               <div className="space-y-0.5">
                 {g.items.map((i) => (
                   <NavItem key={i.to} {...i} counts={counts} countsKey={countsKey} />

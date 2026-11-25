@@ -2,10 +2,12 @@
 // once its own heading ([data-page-title]) has scrolled up under the bar, or a switch that always shows;
 // right: actions. Pages render one responsive h1 of their own instead of duplicating it here.
 import { forwardRef, useEffect, useLayoutEffect, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { useLocation, useNavigate } from "react-router";
+import { useLocation } from "react-router";
 import { IconChevronLeft } from "../icons";
 import { historyIndex, previousScreen } from "./screens";
 import { markBack } from "./transitions";
+import { useNavigate } from "../../lib/link";
+import { useT, type Text } from "../../lib/i18n";
 
 const useIsoLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -13,7 +15,7 @@ export interface BackTarget {
   /** Where back goes when this page was opened directly (no page of ours behind it). */
   to: string;
   /** What the button says then; otherwise it names the page behind, or reads "返回". */
-  label: string;
+  label: Text;
 }
 
 export function PhoneBar({ back, title, leading, center, actions }: {
@@ -41,7 +43,7 @@ export function PhoneBar({ back, title, leading, center, actions }: {
             title && (
               <span
                 aria-hidden={!titleShown}
-                className={`truncate text-[15.5px] font-semibold text-ink transition-[opacity,transform] duration-200 ${titleShown ? "translate-y-0 opacity-100" : "translate-y-1 opacity-0"}`}
+                className={`truncate text-ui-body-plus font-semibold text-ink transition-[opacity,transform] duration-200 ${titleShown ? "translate-y-0 opacity-100" : "translate-y-1 opacity-0"}`}
               >
                 {title}
               </span>
@@ -58,12 +60,13 @@ export function PhoneBar({ back, title, leading, center, actions }: {
 function BackButton({ to, label }: BackTarget) {
   const navigate = useNavigate();
   const { key } = useLocation();
-  const [text, setText] = useState(label);
+  const t = useT();
+  const [text, setText] = useState(t(label));
   useIsoLayoutEffect(() => {
-    if (historyIndex() === 0) return setText(label);
+    if (historyIndex() === 0) return setText(t(label));
     const behind = previousScreen();
-    setText(behind ? behind : "返回");
-  }, [key, label]);
+    setText(behind ? t(behind) : t("返回", "Back"));
+  }, [key, label, t]);
   return (
     <button
       type="button"

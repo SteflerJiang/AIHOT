@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { sourceFiles, type Violation } from "./source-debt.ts";
+import { sourceFiles, type Violation } from "./source-checks.ts";
 
 const root = new URL("../", import.meta.url);
 const read = (file: string) => readFileSync(new URL(file, root), "utf8");
@@ -38,7 +38,7 @@ export function presentationAssertions() {
       const cls = /\.toHaveClass\s*\(|\b(?:expect|assert(?:\.\w+)?)\s*\([^;]*?(?:\.classList\.contains\(|\.className\b|getAttribute\(["']class["']\))/.test(line);
       const pixels = /(?:\.toBeLessThan(?:OrEqual)?\(\s*\d|<=?\s*\d+\s*[,)])/.test(line)
         && /Math\.abs\([^;]*?(?:\.(?:top|bottom|left|right|width|height)\b|getBoundingClientRect\()/.test(line);
-      if (cls || pixels) hits.push({ line: i + 1, code: line.trim(), fix: cls
+      if (cls || pixels) hits.push({ line: i + 1, fix: cls
         ? "请断言读者能看到的内容、状态或可执行的操作，移除对 CSS 类名的断言"
         : "请比较可见条目、顺序或能否操作，移除元素坐标只差几个像素的断言" });
     }

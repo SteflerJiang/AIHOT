@@ -25,11 +25,12 @@ export async function loader({ request }: { request: Request }) {
 
 export function meta() {
   return pageMeta({
+    locale: "zh",
     title: "更新日志",
     description: `${SITE.name} 的功能更新、优化、公告与下线记录。`,
     path: "/changelog",
     image: "/og/pages/changelog.png",
-    jsonLd: breadcrumbLd([{ name: SITE.name, path: "/" }, { name: "更新日志", path: "/changelog" }]),
+    jsonLd: breadcrumbLd([{ name: SITE.name, path: "/" }, { name: "更新日志", path: "/changelog" }], "zh"),
   });
 }
 
@@ -91,7 +92,7 @@ function Day({ date, releases, id }: { date: string; releases: Release[]; id?: s
           >
             <div className="flex items-center gap-3 sm:block">
               <span className="mono block text-ui-caption-lg text-ink-3">{r.time}</span>
-              <span className="inline-flex items-center gap-1.5 text-[11.5px] text-ink-4 sm:mt-1.5">
+              <span className="inline-flex items-center gap-1.5 text-ui-caption-md text-ink-4 sm:mt-1.5">
                 <span className={`size-1.5 rounded-full ${r.urgent ? "bg-hot" : KIND_DOT[r.kind]}`} aria-hidden="true" />
                 {r.kind}
               </span>

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { sourceFiles, type Violation } from "./source-debt.ts";
+import { sourceFiles, type Violation } from "./source-checks.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
 const boundary = "按编号区分先后，或给测试数据明确的过去时间；写入与读取边界不要分两次取此刻";
@@ -13,7 +13,7 @@ const current = String.raw`(?:now\s*\(\s*\)|current_timestamp|clock_timestamp\s*
 const sqlClock = String.raw`(?:${current}|\$\{\s*${clock}\s*\})`;
 const value = new RegExp(String.raw`\b(?:${fields})\s*:\s*${clock}(?!\s*[+-]|\.getTime\(\)\s*[+-])`, "g");
 const due = new RegExp(String.raw`\b(?:${sqlFields})\s*=\s*${sqlClock}(?!\s*[+-])`, "gi");
-const sleeps = /\b(?:waitForTimeout|sleep|delay)\s*\(\s*(?:\d|[\w$]+\s*\))|\bsetTimeout\s*\(\s*(?:\d|(?:resolve|res|r|done)\s*,|\(\s*\)\s*=>\s*(?:resolve|res|r|done)\(\s*\)\s*,)|\btime\.sleep\s*\(/g;
+const sleeps = /\b(?:waitForTimeout|sleep|delay)\s*\(\s*(?:\d|[\w$]+\s*\))|(?<!test\.)\bsetTimeout\s*\(\s*(?:\d|(?:resolve|res|r|done)\s*,|\(\s*\)\s*=>\s*(?:resolve|res|r|done)\(\s*\)\s*,)|\btime\.sleep\s*\(/g;
 const numberId = /\b(?:\w*[Ii]d|ID|key|tag)\s*[:=]\s*(?:String\()?Date\.now\(\)(?!\s*[-+/])|`[^`\n]*\$\{Date\.now\(\)(?:\.toString\([^)]*\))?\}[^`\n]*`/g;
 
 function positions(text: string, pattern: RegExp, fix: string, add: (offset: number, fix: string) => void) {
@@ -22,11 +22,10 @@ function positions(text: string, pattern: RegExp, fix: string, add: (offset: num
 
 export function clockViolations(source: string): Violation[] {
   const text = source.replace(/^\s*(?:\/\/|\/\*|\*|#)[^\n]*/gm, comment => comment.replace(/[^\n]/g, " "));
-  const lines = source.split("\n");
   const hits: Violation[] = [];
   const add = (at: number, fix: string) => {
     const line = text.slice(0, at).split("\n").length;
-    hits.push({ line, code: `${fix.slice(0, 2)} ${lines[line - 1]!.trim()}`, fix });
+    hits.push({ line, fix });
   };
   positions(text, value, boundary, add);
   for (const update of text.matchAll(/\bUPDATE\s+[\w.]+\s+(?:AS\s+\w+\s+)?SET\s+([^;`]*?)(?=\bWHERE\b|\bRETURNING\b|[;`]|$)/gi)) {
@@ -77,7 +76,7 @@ export function clockViolations(source: string): Violation[] {
   return hits;
 }
 
-export function clockDebt() {
+export function clockViolationsByFile() {
   const files = sourceFiles("*test*", "tests/**").filter(file => /(?:^|\/)(?:tests?\/|test_[^/]+\.py$)|\.(?:test|spec)\.[^/]+$/.test(file)
     && /\.(?:[cm]?[jt]sx?|py)$/.test(file) && !file.endsWith("/test-clock.ts"));
   return new Map(files.map(file => [file, clockViolations(readFileSync(path.join(root, file), "utf8"))]));

@@ -1,3 +1,4 @@
+import { pollFor } from "../../../tests/poll.ts";
 // Run after `npm run build -w @aihot/web`. Real production server/router, synthetic HTTP API only.
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
@@ -16,10 +17,12 @@ let metaAfterDeadline = false;
 const apiCookies: Array<string | undefined> = [];
 const api = fakeApi(async (url, res, req) => {
   apiCookies.push(req.headers.cookie);
+  // The English edition's answers (/api/site/en/…) as the Chinese ones here.
+  if (url.pathname.startsWith("/api/site/en/")) url.pathname = url.pathname.replace("/api/site/en/", "/api/site/");
   if (url.pathname === "/api/site/meta") {
     // Past the deadline on the wall clock the server reads: timers run on another clock, and a CI VM
     // stepping its wall clock back mid-wait would otherwise answer before the deadline.
-    while (metaAfterDeadline && Date.now() < deadline * 1000 + 50) await new Promise((resolve) => setTimeout(resolve, deadline * 1000 + 50 - Date.now()));
+    if (metaAfterDeadline) await pollFor(() => Date.now() >= deadline * 1000 + 50, "upstream cache expiry");
     return { changelogVersion: "2026-09-28T12:00" };
   }
   if (url.pathname === "/api/site/timeline") {
@@ -29,6 +32,9 @@ const api = fakeApi(async (url, res, req) => {
     return { filters, cards: [], nextCursor: null, dayCounts: [], hot: null };
   }
   if (url.pathname === "/api/site/hot") return { entries: [] };
+  if (url.pathname === "/api/site/pool") {
+    return { filters: { channel: "all", category: null, tag: null, q: null, tab: null }, items: [], tagTopics: {}, page: Number(url.searchParams.get("page") ?? 1), pageCount: 3, total: 0, todayCount: 0, freshness: new Date().toISOString() };
+  }
   if (url.pathname === "/api/site/echo-client") return { forwarded: req.headers["x-forwarded-for"], real: req.headers["x-real-ip"] };
   if (url.pathname === "/api/site/download") {
     res.setHeader("Content-Type", "text/markdown; charset=utf-8");
@@ -181,6 +187,25 @@ test("browser freshness shares the selected deadline, including slow sibling loa
   }
 });
 
+// A withdrawal purges the list pages at their bare addresses (modules/ops/backend/purge.ts): a filtered or later page
+// is an entry of its own at the edge, gone only when it expires. So these stay there a minute at most, in both languages.
+test("filtered and later list pages stay in shared caches a minute at most", async () => {
+  const savedDeadline = deadline;
+  try {
+    deadline = Math.floor(Date.now() / 1000) + 3600;
+    for (const pathname of ["/?tag=x", "/?category=ai-models", "/_.data?tag=x", "/all?page=2", "/all.data?page=2", "/en?tag=x", "/en.data?tag=x", "/en/all?page=2", "/en/all.data?page=2"]) {
+      const res = await fetch(origin + pathname);
+      const cc = res.headers.get("Cache-Control") ?? "";
+      assert.equal(res.status, 200, pathname);
+      const shared = Number(cc.match(/(?:^|,)\s*s-maxage=(\d+)/)?.[1] ?? 0);
+      assert.ok(shared <= 60, `${pathname}: ${cc}. A withdrawal clears this page only when it expires (purge.ts): keep it within a minute.`);
+      await res.text();
+    }
+  } finally {
+    deadline = savedDeadline;
+  }
+});
+
 test("a shared cache may keep an item page longer than browsers", async () => {
   const res = await fetch(`${origin}/items/long-lived.data`);
   assert.equal(res.status, 200);
@@ -234,7 +259,7 @@ test("a signed-in admin is sent past the sign-in page", { skip: !ADMIN && "this 
       await away.text();
     }
     const anonymous = await fetch(`${signedIn.origin}/admin/login?return=%2Fadmin`, { redirect: "manual" });
-    assert.equal(anonymous.status, 200, "without a session the page still offers the ways in");
+    assert.equal(anonymous.status, 200, "without a session the page still offers the password sign-in");
     await anonymous.text();
   } finally {
     await signedIn.stop();
