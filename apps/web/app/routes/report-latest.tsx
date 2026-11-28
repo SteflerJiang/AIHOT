@@ -1,11 +1,11 @@
 import { useLoaderData } from "react-router";
 import type { Route } from "./+types/report-latest";
-import { REPORT_NAMES, REPORT_NAMES_EN, reportDateLabel, reportDateLabelEn, type ReportLatestPage } from "@aihot/contracts/site";
+import { REPORT_NAMES, REPORT_NAMES_EN, reportDateLabel, reportDateLabelEn, type ReportLatestPage } from "@aihot/contracts/reports";
 import { REPORTS, SEO_TITLES, SITE, subjectAfter, withSubject } from "@aihot/site";
 import { ENGLISH } from "@aihot/contracts/english";
 import { cachedPage, loadOr404, pagePathname } from "../lib/api.server";
 import { pageReuse } from "../lib/page-reuse";
-import { breadcrumbLd, pageMeta, reportDescription, reportLd } from "../lib/seo";
+import { breadcrumbLd, pageMeta, reportDescription, reportLd, titled } from "../lib/seo";
 import { beijingDate } from "@aihot/contracts/time";
 import { EmptyState } from "../components/ui/Page";
 import { ReportLayout } from "../features/report/ReportLayout";
@@ -14,26 +14,28 @@ import { KIND_PATH, archiveGroups, feedLink, kindFromPath } from "../features/re
 import type { Screen } from "../components/shell/screens";
 import { apiIn, L, localeOf, translator, useLocale, useT } from "../lib/i18n";
 
-export const handle: Screen = { tab: "daily", name: L("日报", "Daily") };
+// One module serves 日报, 周报 and 月报: a back button names the one it leads to.
+export const handle: Screen = { tab: "daily", name: (path) => L(REPORT_NAMES[kindFromPath(path)], REPORT_NAMES_EN[kindFromPath(path)]) };
 export { pageHeaders as headers } from "../lib/api.server";
 export const { clientLoader, shouldRevalidate } = pageReuse<typeof loader>();
 
 export async function loader({ request }: Route.LoaderArgs) {
   const kind = kindFromPath(pagePathname(request));
-  const { index, report } = await loadOr404<ReportLatestPage>(apiIn(`/api/site/reports/${kind}/latest-page`, localeOf(pagePathname(request))), { signal: request.signal });
+  const { index, report } = await loadOr404<ReportLatestPage>(apiIn(`/reports/${kind}/latest-page`, localeOf(pagePathname(request))), { signal: request.signal });
   return cachedPage(600, { kind, report, index, today: beijingDate(Date.now()) });
 }
 
 export function meta({ loaderData, location }: Route.MetaArgs) {
   const locale = localeOf(location.pathname);
   const t = translator(locale);
-  const kind = loaderData?.kind ?? "daily";
-  const report = loaderData?.report;
+  const kind = loaderData?.kind ?? kindFromPath(location.pathname);
+  const name = t(withSubject(REPORT_NAMES[kind]), withSubject(REPORT_NAMES_EN[kind]));
+  if (!loaderData) return [{ title: titled(name) }];
+  const report = loaderData.report;
   // What this issue says, so a search result shows today's date and news rather than what the page is.
   const description = (report && reportDescription(report, locale)) ?? t(`${REPORTS.descriptions[kind]}。`, `${ENGLISH?.reports.descriptions[kind] ?? REPORTS.descriptions[kind]}.`);
   // One address however it was written (/daily/, a different case): the router matches them all.
   const path = KIND_PATH[kind];
-  const name = t(withSubject(REPORT_NAMES[kind]), withSubject(REPORT_NAMES_EN[kind]));
   return [...pageMeta({
     locale,
     title: report ? t(SEO_TITLES.latestReport(kind, reportDateLabel(kind, report.key)), (ENGLISH?.seoTitles ?? SEO_TITLES).latestReport(kind, reportDateLabelEn(kind, report.key))) : name,

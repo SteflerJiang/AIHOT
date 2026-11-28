@@ -1,3 +1,4 @@
+import { localizePath } from "@aihot/contracts/reader-pages";
 // The English edition's answers (/api/site/en/…, only where the site has an English edition): the same answers
 // as the Chinese ones, with each Chinese text the site wrote (titles, summaries, reasons, event digests, report
 // paragraphs, source names) replaced by its English. The worker (editorial/english.ts) translates the Chinese
@@ -7,12 +8,13 @@
 // Each answer's overlay runs twice: once to gather the texts it shows, once to put their English in. The worker
 // gathers through the same overlays, so what it translates is what the pages show.
 import type {
-  FeedItemSummary, GroupReportsResponse, HotEntryView, HotParticipant, HotResponse, HotStripEntry, ItemAvailability,
-  PoolResponse, ReportCitation, ReportDetail, ReportIndexResponse, ReportLatestPage, ReportNavigationResponse,
-  SearchSuggestions, SiteItemDetail, SiteStats, SourceRef, StoryDetail, StoryFollowupsResponse, StoryReportView, TimelineResponse,
+  ChangelogResponse, FeedItemSummary, GroupReportsResponse, HotEntryView, HotParticipant, HotResponse, HotStripEntry, ItemAvailability,
+  PoolResponse, SearchSuggestions, SiteItemDetail, SiteStats, SourceRef, StoryDetail, StoryFollowupsResponse, StoryReportView, TimelineResponse,
   TopicGroup, TopicLink, TopicPage, TopicSummary, TopicsResponse,
 } from "@aihot/contracts/site";
-import { REPORT_NAMES_EN } from "@aihot/contracts/site";
+import {
+  REPORT_NAMES_EN, type ReportCitation, type ReportDetail, type ReportIndexResponse, type ReportKind, type ReportLatestPage, type ReportNavigationResponse,
+} from "@aihot/contracts/reports";
 import { ENGLISH, HAN, needsEnglish } from "@aihot/contracts/english";
 
 export { HAN, needsEnglish };
@@ -24,7 +26,7 @@ import { sha256 } from "../lib/ids.ts";
 import { mentionsIn } from "./mentions.ts";
 import type { V1ItemPayload } from "./items.ts";
 import { siteUrl } from "./links.ts";
-import { COMPOSED_OVERVIEW, type ComposedOverview, type DailyNote, type FeedIssue, type ReportKind, type v1Dailies, type v1Daily, type v1Period, type v1Periods } from "./reports.ts";
+import { COMPOSED_OVERVIEW, SECTION_KEY, type ComposedOverview, type dailyWithNotes, type FeedIssue, type V1DailyResponse, type V1PeriodResponse, type v1Dailies, type v1Periods } from "./reports.ts";
 import { publicSourceName } from "./rules.ts";
 import { cardText, type v1HotTopics, type v1Story } from "./stories.ts";
 import { monogramOf } from "./topics.ts";
@@ -116,7 +118,7 @@ export async function textsIn<T>(value: T, overlay: Overlay<T>): Promise<WantedT
  * string under a `names` key is a name; nothing under a `keep` key changes (data matched as written, like search aliases).
  * A short line without sentence punctuation reads as a headline (labels, titles), anything longer as running text.
  */
-export function everyText<T>(opts: { keep?: readonly string[]; names?: readonly string[] } = {}): Overlay<T> {
+export function everyText<T>(opts: { keep?: readonly string[]; names?: readonly string[] } = {}): (value: T, c: Copy) => T {
   const keep = new Set(opts.keep ?? []);
   const names = new Set(opts.names ?? []);
   const kindOf = (key: string, text: string): CopyKind => (names.has(key) ? "name" : text.length <= 40 && !/[。！？；]/.test(text) ? "headline" : "text");
@@ -132,6 +134,18 @@ export function everyText<T>(opts: { keep?: readonly string[]; names?: readonly 
   };
   return (value, c) => walk(value, c, "") as T;
 }
+
+/** The entry kind is a filter value. The optional illustrated feature carries the site's own text. */
+const featureCopy = everyText<unknown>();
+export const changelog: Overlay<ChangelogResponse> = (data, c) => ({
+  ...data,
+  releases: data.releases.map(r => ({
+    ...r,
+    title: c.one("headline", r.title),
+    body: r.body.map(line => line.startsWith("- ") ? "- " + c.one("text", line.slice(2)) : c.one("text", line)),
+    ...(r.feature ? { feature: featureCopy(r.feature, c) } : {}),
+  })),
+});
 
 /** Whether the publication `alias` may still show its original: not withdrawn, its original not withheld. */
 export const originalShown = (alias: string) => sql`(${sql(alias)}.visibility <> 'withdrawn' AND NOT ${sql(alias)}.suppress_original)`;
@@ -332,7 +346,8 @@ export const feedIssues = (kind: ReportKind): Overlay<FeedIssue[]> => (issues, c
     headline: headline ?? null,
     leadParagraph: leadParagraph ?? null,
     sections: r.sections.map((s) => ({
-      label: kind === "daily" ? sectionLabelIn(s.label, "en") : c.one("headline", s.label),
+      ...(s.key ? { key: s.key } : {}),
+      label: kind === "daily" ? sectionLabelIn(s.label, "en", s.key) : c.one("headline", s.label),
       items: s.items.map((i) => ({ ...i, title: c.one("headline", i.title, i.id) })),
     })),
   };
@@ -442,30 +457,38 @@ export const v1StoryAnswer = (by: V1Reader): Overlay<V1Story> => (r, c) => {
   };
 };
 
-type V1Daily = NonNullable<Awaited<ReturnType<typeof v1Daily>>>;
-export const v1DailyAnswer = (by: V1Reader): Overlay<V1Daily> => (r, c) => {
+export const v1DailyAnswer = (by: V1Reader): Overlay<V1DailyResponse> => (r, c) => {
   const d = r.report;
   return {
     ...r,
     report: {
       ...d,
       lead: d.lead && { title: c.one("headline", d.lead.title), leadParagraph: c.one("text", d.lead.leadParagraph) },
-      sections: d.sections.map((s: (typeof d.sections)[number]) => ({ ...s, label: sectionLabelIn(s.label, "en"), items: s.items.map((i: (typeof s.items)[number]) => v1Entry(i, c, by)) })),
-      flashes: d.flashes.map((i: (typeof d.flashes)[number]) => v1Entry(i, c, by)),
-      highlights: d.highlights.map((i: (typeof d.highlights)[number]) => v1Entry(i, c, by)),
+      sections: d.sections.map((s) => {
+        const next = { ...s, label: sectionLabelIn(s.label, "en", s[SECTION_KEY]), items: s.items.map((i) => v1Entry(i, c, by)) };
+        if (s[SECTION_KEY]) next[SECTION_KEY] = s[SECTION_KEY];
+        return next;
+      }),
+      flashes: d.flashes.map((i) => v1Entry(i, c, by)),
+      highlights: d.highlights.map((i) => v1Entry(i, c, by)),
     },
   };
 };
 
-/** What the Agent answer adds to a daily's entries: the event's other developments, by their titles. */
-export const v1DailyNotes: Overlay<Map<string, DailyNote>> = (notes, c) =>
-  new Map([...notes].map(([key, n]) => [key, { ...n, related: n.related.map((x) => ({ ...x, title: c.one("headline", x.title) })) }]));
+/** The Agent daily reads its body and the notes about related developments from the same translations. */
+type DailyWithNotes = NonNullable<Awaited<ReturnType<typeof dailyWithNotes>>>;
+export const v1DailyWithNotes = (by: V1Reader): Overlay<DailyWithNotes> => async (daily, c) => ({
+  ...daily,
+  body: await v1DailyAnswer(by)(daily.body, c),
+  notes: by === "json" ? daily.notes : new Map([...daily.notes].map(([key, n]) => [
+    key, { ...n, related: n.related.map((x) => ({ ...x, title: c.one("headline", x.title) })) },
+  ])),
+});
 
-type V1Period = NonNullable<Awaited<ReturnType<typeof v1Period>>>;
 /** A weekly or monthly; an overview composed by rule is said in English from the titles it names, as on its page. */
-export const v1PeriodAnswer = (kind: "weekly" | "monthly", by: V1Reader): Overlay<V1Period> => (r, c) => {
+export const v1PeriodAnswer = (kind: "weekly" | "monthly", by: V1Reader): Overlay<V1PeriodResponse> => (r, c) => {
   const p = r.report;
-  const composed = (p as typeof p & { [COMPOSED_OVERVIEW]?: ComposedOverview })[COMPOSED_OVERVIEW];
+  const composed = p[COMPOSED_OVERVIEW];
   let overview = c.one("text", p.overview);
   if (composed) {
     const titles = composed.named.map((n) => c.one("headline", n.title));
@@ -475,7 +498,7 @@ export const v1PeriodAnswer = (kind: "weekly" | "monthly", by: V1Reader): Overla
     ...r,
     report: {
       ...p, headline: c.one("headline", p.headline), overview,
-      sections: p.sections.map((s: (typeof p.sections)[number]) => ({ ...s, label: c.one("headline", s.label), summary: c.one("text", s.summary), items: s.items.map((i: (typeof s.items)[number]) => v1Entry(i, c, by)) })),
+      sections: p.sections.map((s) => ({ ...s, label: c.one("headline", s.label), summary: c.one("text", s.summary), items: s.items.map((i) => v1Entry(i, c, by)) })),
     },
   };
 };
@@ -488,8 +511,6 @@ export const v1PeriodIndex: Overlay<Awaited<ReturnType<typeof v1Periods>>> = (r,
   ...r, items: r.items.map((e) => ({ ...e, headline: c.one("headline", e.headline) })),
 });
 
-/** The site's pages a v1 answer links to that have an English edition, and its own v1 addresses. */
-const PAGE_LINK = new RegExp(`^(${siteUrl("").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})/(items|story|daily|weekly|monthly)(?=[/?#]|$)`);
 const LINK_KEYS = new Set(["aihot", "story", "api", "url", "link"]);
 
 /**
@@ -501,8 +522,9 @@ export function englishLinks<T>(value: T): T {
   const walk = (v: unknown, key: string): unknown => {
     if (typeof v === "string") {
       if (!LINK_KEYS.has(key)) return v;
-      if (PAGE_LINK.test(v)) return v.replace(PAGE_LINK, "$1/en/$2");
-      return v.startsWith(api) ? `${v}${v.includes("?") ? "&" : "?"}lang=en` : v;
+      if (v.startsWith(api)) return `${v}${v.includes("?") ? "&" : "?"}lang=en`;
+      const base = siteUrl("");
+      return v.startsWith(base + "/") ? base + localizePath(v.slice(base.length), "en") : v;
     }
     if (Array.isArray(v)) return v.map((x) => walk(x, key));
     if (v instanceof Map) return new Map([...v].map(([k, x]) => [k, walk(x, key)]));

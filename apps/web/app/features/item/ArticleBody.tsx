@@ -6,6 +6,14 @@ import { Lightbox, type LightboxImage } from "../../components/ui/Lightbox";
 import { copyText } from "../../lib/clipboard";
 import { translator, useLocale, type Locale } from "../../lib/i18n";
 
+function fullImageUrl(preview: string, signature?: string): string {
+  if (!signature) return preview;
+  const url = new URL(preview);
+  url.searchParams.set("mode", "full");
+  url.searchParams.set("sig", signature);
+  return url.href;
+}
+
 /** Pictures worth enlarging: not inside a link, not tiny icons. */
 function canZoom(img: HTMLImageElement): boolean {
   return !img.closest("a") && !(img.naturalWidth && img.naturalWidth < 120);
@@ -60,7 +68,13 @@ function enhanceCode(root: HTMLElement, locale: Locale): () => void {
     button.className = "code-block-copy";
     button.textContent = t("复制", "Copy");
     button.setAttribute("aria-label", t("复制代码", "Copy code"));
+    let reset: ReturnType<typeof setTimeout> | undefined;
     button.addEventListener("click", async () => {
+      // A second copy starts its own wait, so the label does not turn back early.
+      if (reset !== undefined) {
+        clearTimeout(reset);
+        timers.delete(reset);
+      }
       let ok = true;
       try {
         await copyText(source);
@@ -71,9 +85,11 @@ function enhanceCode(root: HTMLElement, locale: Locale): () => void {
       button.textContent = ok ? t("已复制", "Copied") : t("请手动复制", "Copy manually");
       const timer = setTimeout(() => {
         timers.delete(timer);
+        reset = undefined;
         button.dataset.status = "";
         button.textContent = t("复制", "Copy");
-      }, ok ? 1800 : 2400);
+      }, ok ? 1500 : 2400);
+      reset = timer;
       timers.add(timer);
     });
     head.append(label, button);
@@ -129,6 +145,17 @@ export function ArticleBody({ html }: { html: string }) {
     const onLoad = (e: Event) => {
       if (e.target instanceof HTMLImageElement) mark(e.target);
     };
+    // A first play can arrive before the background encoder has finished.
+    const onVideoError = (event: Event) => {
+      const video = event.target;
+      if (!(video instanceof HTMLVideoElement) || !video.dataset.fullSig) return;
+      const image = document.createElement("img");
+      image.alt = video.getAttribute("aria-label") ?? "";
+      image.onload = () => video.replaceWith(image);
+      // If the original is too large to serve, keep the poster and let the reader try playback again.
+      image.onerror = () => video.replaceWith(video.cloneNode(true));
+      image.src = fullImageUrl(video.poster, video.dataset.fullSig);
+    };
     const showImage = (e: MouseEvent | KeyboardEvent) => {
       const img = e.target instanceof HTMLImageElement ? e.target : null;
       if (!img || !img.classList.contains("zoomable")) return;
@@ -136,17 +163,19 @@ export function ArticleBody({ html }: { html: string }) {
       const index = list.indexOf(img);
       if (index < 0) return;
       e.preventDefault();
-      setImages(list.map((i) => ({ src: i.src, alt: i.alt })));
+      setImages(list.map((i) => ({ src: fullImageUrl(i.src, i.dataset.fullSig), alt: i.alt })));
       setOpen(index);
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Enter" || e.key === " ") showImage(e);
     };
+    root.addEventListener("error", onVideoError, true);
     root.addEventListener("load", onLoad, true);
     root.addEventListener("click", showImage);
     root.addEventListener("keydown", onKeyDown);
     return () => {
       cleanCode();
+      root.removeEventListener("error", onVideoError, true);
       root.removeEventListener("load", onLoad, true);
       root.removeEventListener("click", showImage);
       root.removeEventListener("keydown", onKeyDown);
@@ -155,7 +184,7 @@ export function ArticleBody({ html }: { html: string }) {
   return (
     <>
       <div ref={ref} className="prose" dangerouslySetInnerHTML={{ __html: html }} />
-      <Lightbox images={images} index={open} onIndex={setOpen} onClose={() => setOpen(null)} />
+      <Lightbox images={images} index={open} onIndex={setOpen} onClose={() => setOpen(null)} origin={(i) => (ref.current ? zoomable(ref.current)[i] : null)} />
     </>
   );
 }

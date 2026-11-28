@@ -6,7 +6,7 @@ import { itemUrl } from "./links.ts";
 import { POLICY, SITE } from "@aihot/site";
 import { sql, type Db } from "../db.ts";
 import { isChineseText } from "../lib/text.ts";
-import { isEmptyOrLinkOnly, withXArticle } from "../content/posts.ts";
+import { isEmptyOrLinkOnly, quotedTweetIdSql, withXArticle } from "../content/posts.ts";
 import { proxiedImage, proxiedImageSet } from "../media/imgproxy.ts";
 import { sourceOwnsPost } from "../sources/account.ts";
 import { displayTags, publicSourceName } from "./rules.ts";
@@ -117,7 +117,7 @@ export const ITEM_FROM = sql`
   JOIN articles a ON a.id = p.article_id
   LEFT JOIN stories st ON st.id = p.story_id AND st.merged_into IS NULL
   LEFT JOIN translations tr ON tr.article_id = p.article_id AND tr.lang = 'zh' AND tr.revision >= a.revision
-  LEFT JOIN quote_translations qt ON p.channel = 'x' AND qt.tweet_id = coalesce(a.x_post->'quoted'->>'tweetId', substring(a.x_post->'quoted'->>'url' from '/status/([0-9]+)'))`;
+  LEFT JOIN quote_translations qt ON p.channel = 'x' AND qt.tweet_id = ${quotedTweetIdSql()}`;
 
 export function channelCondition(channel: ChannelKey | null | undefined) {
   if (!channel || channel === "all") return sql``;
@@ -143,13 +143,14 @@ export function tagCondition(tag: string | null | undefined) {
 }
 
 function mediaView(m: Record<string, any>, mode: "card" | "thumb" | "full" = "thumb", responsive = false): MediaView | null {
-  const url = proxiedImage(m.url, mode);
+  const detail = mode === "full" && responsive;
+  const url = proxiedImage(m.url, detail ? "reading" : mode);
   if (!url) return null;
-  const srcSet = responsive ? proxiedImageSet(m.poster ?? m.url, mode === "full" ? "body" : "card") : null;
+  const srcSet = responsive && !detail ? proxiedImageSet(m.poster ?? m.url, "card") : null;
   return {
     kind: m.kind === "video" ? "video" : "image",
     url,
-    ...(responsive && mode !== "full" ? { fullUrl: proxiedImage(m.url, "full")! } : {}),
+    ...(responsive ? { fullUrl: proxiedImage(m.url, "full")! } : {}),
     ...(srcSet ? { srcSet } : {}),
     width: typeof m.width === "number" ? m.width : null,
     height: typeof m.height === "number" ? m.height : null,
@@ -183,7 +184,7 @@ export function xView(row: Pick<ItemRow, "x_post" | "zh_text"> & Partial<Pick<It
     quoted,
     article: !!row.x_article?.text,
     // A multi-image list grid is 112 CSS px wide; one image can be 240 px. Keep 3x pixels for both.
-    // Detail retains full media for the lightbox; srcSet bounds the displayed image.
+    // The detail preview and its on-demand full image have separate addresses.
     media: media.map(({ raw, view }) => compact && media.length > 1 ? mediaView(raw, "card", responsive)! : view),
   };
 }

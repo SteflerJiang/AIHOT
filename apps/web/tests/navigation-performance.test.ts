@@ -13,7 +13,7 @@
 import assert from "node:assert/strict";
 import { before, after, test } from "node:test";
 import { chromium, webkit, expect, type Browser } from "@playwright/test";
-import type { ReportDetail } from "@aihot/contracts/site";
+import type { ReportDetail } from "@aihot/contracts/reports";
 import { FIXTURE_AT as at, fakeApi, feedItem, itemDetail, startWebServer, visit, type WebServer } from "./web-server.ts";
 
 const item = feedItem({id:'navigation-fixture',title:'性能检查文章'});
@@ -22,6 +22,7 @@ const codeSource='import json\n\nwith open("data.json") as file:\n    data = jso
 const readerBody=Array.from({length:30},(_,i)=>`<p>阅读段落 ${i}：先阅读文章，再查看后面的代码和图片。正文保持可读，图片和代码在需要时增强。</p>`).join('')
   +`<pre><code>${codeSource}</code></pre><pre><code>x = 1</code></pre>`
   +Array.from({length:12},(_,i)=>`<img src="/reader-image/${i}.svg" alt="正文配图 ${i}" width="640" height="360" loading="lazy">`).join('')
+  +'<video controls muted preload="none" poster="/reader-image/poster.svg?mode=reading" src="/reader-image/cold.mp4" data-full-sig="fixture" aria-label="示范动图"></video>'
   +'<img src="/reader-image/tiny.svg" alt="小图标" width="16" height="16" loading="lazy"><a href="https://example.org"><img src="/reader-image/linked.svg" alt="链接图片" width="640" height="360" loading="lazy"></a>';
 const report = (kind:'daily'|'weekly'|'monthly'): ReportDetail => ({kind,key:kind==='daily'?'2026-10-04':kind==='weekly'?'2026-W40':'2026-10',issueNumber:1,title:'Fixture '+kind,generatedAt:at,lead:{title:'Fixture '+kind,leadParagraph:'Fixture report'},leadItemId:null,overview:null,highlights:[],sections:[],flashes:[],cover:null,metrics:{},readingMinutes:1,prev:null,next:null,mentions:[]});
 const hits: string[] = [];
@@ -34,7 +35,7 @@ let chrome:Browser;
 let safari:Browser;
 const api=fakeApi((url,res,req)=>{
   const p=url.pathname;
-  if(p==='/api/site/meta'||p==='/api/site/track')return;
+  if(p==='/api/site/track')return;
   hits.push(req.url!);
   if(p===failing){res.statusCode=503;return {code:'unavailable'};}
   if(p==='/api/site/search/suggestions')return {topics:[{slug:'openai',name:'OpenAI',group:'company'}],hot:[{rank:1,title:'建议版本 '+suggestionsVersion,to:'/story/fixture'}]};
@@ -280,6 +281,33 @@ test('reader enhancements wait for visible code and update only the picture that
     await expect(page.getByText('Original reader text',{exact:true})).toBeVisible();
     assert.equal(await page.locator('.code-block-copy').count(),0);
   }finally{await context.close();}
+});
+
+test('a cold player keeps its preview when the original is too large and can be played again', async () => {
+  const context = await chrome.newContext();
+  const page = await context.newPage();
+  let attempts = 0;
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"></svg>';
+  await page.route('**/reader-image/cold.mp4', route => route.fulfill({ status: 202, body: '' }));
+  await page.route('**/reader-image/poster.svg?**', route => {
+    if (new URL(route.request().url()).searchParams.get('mode') === 'full' && ++attempts === 1) {
+      return route.fulfill({ status: 502, body: '' });
+    }
+    return route.fulfill({ contentType: 'image/svg+xml', body: svg });
+  });
+  try {
+    await visit(page, origin + '/items/reader-fixture');
+    const player = page.locator('video[aria-label="示范动图"]');
+    await expect(page.locator('.code-block-copy')).toHaveCount(2);
+    await player.evaluate(video => (video as HTMLVideoElement).play().catch(() => {}));
+    await expect.poll(() => attempts).toBe(1);
+    await expect.poll(() => player.evaluate(video => (video as HTMLVideoElement).error)).toBeNull();
+    await player.evaluate(video => (video as HTMLVideoElement).play().catch(() => {}));
+    await expect(page.locator('img[alt="示范动图"]')).toBeVisible();
+    assert.equal(attempts, 2);
+  } finally {
+    await context.close();
+  }
 });
 
 test('deep reading returns to its anchor, including folded dates',async()=>{

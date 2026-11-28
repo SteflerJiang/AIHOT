@@ -1,7 +1,7 @@
 // Small building blocks shared by feed items, detail pages and lists.
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { FeedItemSummary, MediaView } from "@aihot/contracts/site";
-import { IconBookmark } from "../../components/icons";
+import { IconBookmark, IconPlay } from "../../components/icons";
 import { SourceAvatar } from "../../components/ui/SourceAvatar";
 import { Lightbox } from "../../components/ui/Lightbox";
 import { Picture } from "../../components/ui/Picture";
@@ -29,13 +29,14 @@ export function SourceLine({ item, className = "" }: { item: Pick<FeedItemSummar
 export function MediaThumbs({ media, className = "" }: { media: MediaView[]; className?: string }) {
   const t = useT();
   const [index, setIndex] = useState<number | null>(null);
+  const row = useRef<HTMLDivElement>(null);
   const imageItems = media.filter((m) => m.kind === "image");
   const images = imageItems.map((m) => ({ src: m.fullUrl ?? m.url, alt: m.alt }));
   const shown = media.slice(0, 4);
   if (shown.length === 0) return null;
   return (
     <>
-    <div className={`flex gap-1.5 overflow-hidden ${className}`}>
+    <div ref={row} className={`flex gap-1.5 overflow-hidden ${className}`}>
       {shown.map((m, i) => {
         const Wrapper = m.kind === "image" ? "button" : "span";
         const imageIndex = m.kind === "image" ? imageItems.indexOf(m) : -1;
@@ -45,16 +46,14 @@ export function MediaThumbs({ media, className = "" }: { media: MediaView[]; cla
           {m.kind === "video" && (
             <span className="absolute inset-0 grid place-items-center" aria-hidden="true">
               <span className="grid size-8 place-items-center rounded-full bg-black/55 text-white">
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" className="ml-px">
-                  <path d="M7 4.5v15a1 1 0 001.5.87l13-7.5a1 1 0 000-1.74l-13-7.5A1 1 0 007 4.5z" />
-                </svg>
+                <IconPlay size={12} className="ml-px" />
               </span>
             </span>
           )}
         </Wrapper>
       ); })}
     </div>
-    <Lightbox images={images} index={index} onIndex={setIndex} onClose={() => setIndex(null)} />
+    <Lightbox images={images} index={index} onIndex={setIndex} onClose={() => setIndex(null)} origin={(i) => row.current?.querySelectorAll("button")[i]} />
     </>
   );
 }
@@ -91,7 +90,7 @@ export function StarButton({ item, className = "size-[26px]" }: { item: Starrabl
         e.stopPropagation();
         toggle();
       }}
-      className={`relative z-10 inline-flex shrink-0 items-center justify-center rounded-control transition-colors duration-150 ${on ? "text-accent" : "text-ink-4 hover:bg-bg-sunk hover:text-ink-2"} ${className}`}
+      className={`relative z-10 inline-flex shrink-0 items-center justify-center rounded-control press ${on ? "text-accent" : "text-ink-4 hover:bg-bg-sunk hover:text-ink-2"} ${className}`}
     >
       <span key={pulse} className={`flex ${pulse ? "anim-bump" : ""}`}>
         <IconBookmark size={16} filled={on} />

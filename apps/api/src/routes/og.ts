@@ -3,22 +3,20 @@
 // drawn in English under /og/en/…, for the English pages: the language is in the path, as a CDN may
 // keep one copy of an image whatever its query.
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { ENGLISH, needsEnglish } from "@aihot/contracts/english";
-import type { Locale } from "@aihot/contracts/i18n";
-import { REPORT_NAMES_EN, reportDateLabel, reportDateLabelEn } from "@aihot/contracts/site";
+import { ENGLISH, READER_LANGUAGES, WAITING_ENGLISH_SECONDS, needsEnglish } from "@aihot/contracts/english";
+import { namesEn, type Locale } from "@aihot/contracts/i18n";
+import { isReportKey, isReportKind, REPORT_NAMES, REPORT_NAMES_EN, reportDateLabel, reportDateLabelEn } from "@aihot/contracts/reports";
 import { topicDefinition, topicName } from "@aihot/contracts/taxonomy";
 import { TOPIC_GROUP_EN } from "@aihot/industry/english";
 import * as english from "@aihot/backend/publication/english";
 import { loadItemOgCard, loadItemPoster } from "@aihot/backend/publication/og";
-import { loadReport, type ReportKind } from "@aihot/backend/publication/reports";
+import { loadReport } from "@aihot/backend/publication/reports";
 import { findTopic, TOPIC_GROUPS, TOPICS } from "@aihot/backend/publication/topics";
 import { loadStoryShare, resolveStory } from "@aihot/backend/publication/stories";
 import { ogEtag, renderOg, type OgCard } from "@aihot/backend/media/og";
 import { posterEtag, renderPoster } from "@aihot/backend/media/poster";
 import { CARDS, REPORTS, SITE, subjectAfter, withSubject } from "@aihot/site";
-
-/** "A, B and C". */
-const listEn = (words: string[]) => (words.length > 1 ? `${words.slice(0, -1).join(", ")} and ${words.at(-1)}` : (words[0] ?? ""));
+import { etagMatches } from "../http/respond.ts";
 
 /** The pages' share cards: the site's texts, and the topic count of the topic list. */
 const PAGES: Record<Locale, Record<string, OgCard>> = {
@@ -28,7 +26,7 @@ const PAGES: Record<Locale, Record<string, OgCard>> = {
   },
   en: Object.fromEntries(Object.entries({
     ...ENGLISH?.cards,
-    topics: { kicker: "Topics", title: `${TOPICS.length} ${SITE.subject} topics we follow`, subtitle: `${listEn(TOPIC_GROUPS.map((g) => TOPIC_GROUP_EN[g.key]?.name ?? g.name))}.` },
+    topics: { kicker: "Topics", title: `${TOPICS.length} ${SITE.subject} topics we follow`, subtitle: `${namesEn(TOPIC_GROUPS.map((g) => TOPIC_GROUP_EN[g.key]?.name ?? g.name))}.` },
   }).map(([name, card]) => [name, { ...card, lang: "en" as const }])),
 };
 
@@ -38,25 +36,33 @@ const PAGES: Record<Locale, Record<string, OgCard>> = {
  */
 const CONTENT_IMAGE_CACHE = "public, max-age=300, s-maxage=3600, must-revalidate";
 /** An English card whose words are not all in English yet: kept a minute, so it turns English soon after they are. */
-const WAITING_IMAGE_CACHE = "public, max-age=60, s-maxage=60, must-revalidate";
+const WAITING_IMAGE_CACHE = `public, max-age=${WAITING_ENGLISH_SECONDS}, s-maxage=${WAITING_ENGLISH_SECONDS}, must-revalidate`;
+
+async function sendPng(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  opts: { tag: string; waiting: boolean; cacheControl: string; render: () => Promise<{ png: Buffer }> },
+) {
+  reply.header("ETag", opts.tag).header("Cache-Control", opts.waiting ? WAITING_IMAGE_CACHE : opts.cacheControl);
+  if (etagMatches(req.headers["if-none-match"], opts.tag)) return reply.code(304).send();
+  return reply.type("image/png").send((await opts.render()).png);
+}
 
 async function send(req: FastifyRequest, reply: FastifyReply, card: OgCard, maxAge: number, cacheControl = `public, max-age=${maxAge}, s-maxage=${maxAge * 7}, stale-while-revalidate=86400`) {
-  const tag = `"og-${ogEtag(card)}"`;
-  const waiting = card.lang === "en" && (needsEnglish(card.title) || needsEnglish(card.subtitle));
-  reply.header("ETag", tag).header("Cache-Control", waiting ? WAITING_IMAGE_CACHE : cacheControl);
-  if (String(req.headers["if-none-match"] ?? "").split(",").some((t) => t.trim().replace(/^W\//, "") === tag)) return reply.code(304).send();
-  return reply.type("image/png").send((await renderOg(card)).png);
+  return sendPng(req, reply, {
+    tag: `"og-${ogEtag(card)}"`,
+    waiting: card.lang === "en" && (needsEnglish(card.title) || needsEnglish(card.subtitle)),
+    cacheControl,
+    render: () => renderOg(card),
+  });
 }
 
 function notFound(reply: FastifyReply) {
   return reply.code(404).header("Cache-Control", "public, max-age=300").type("text/plain; charset=utf-8").send("Not found");
 }
 
-const REPORT_NAMES: Record<ReportKind, string> = { daily: withSubject("日报"), weekly: withSubject("周报"), monthly: withSubject("月报") };
-
 export function registerOg(app: FastifyInstance) {
-  registerIn(app, "zh");
-  if (ENGLISH) registerIn(app, "en");
+  for (const lang of READER_LANGUAGES) registerIn(app, lang);
 }
 
 function registerIn(app: FastifyInstance, lang: Locale) {
@@ -87,17 +93,19 @@ function registerIn(app: FastifyInstance, lang: Locale) {
     if (!file.endsWith(".png")) return notFound(reply);
     const poster = await loadItemPoster(file.slice(0, -4), lang);
     if (!poster) return notFound(reply);
-    const tag = `"poster-${posterEtag(poster)}"`;
-    const waiting = en && (needsEnglish(poster.title) || needsEnglish(poster.summary));
-    reply.header("ETag", tag).header("Cache-Control", waiting ? WAITING_IMAGE_CACHE : CONTENT_IMAGE_CACHE);
-    if (String(req.headers["if-none-match"] ?? "").split(",").some((t) => t.trim().replace(/^W\//, "") === tag)) return reply.code(304).send();
-    return reply.type("image/png").send((await renderPoster(poster)).png);
+    return sendPng(req, reply, {
+      tag: `"poster-${posterEtag(poster)}"`,
+      waiting: en && (needsEnglish(poster.title) || needsEnglish(poster.summary)),
+      cacheControl: CONTENT_IMAGE_CACHE,
+      render: () => renderPoster(poster),
+    });
   });
 
   app.get(`${og}/reports/:kind/:file`, async (req, reply) => {
     const { kind, file } = req.params as { kind: string; file: string };
-    if (!["daily", "weekly", "monthly"].includes(kind) || !file.endsWith(".png")) return notFound(reply);
-    const found = await loadReport(kind as ReportKind, file.slice(0, -4));
+    const key = file.endsWith(".png") ? file.slice(0, -4) : "";
+    if (!isReportKind(kind) || !key || !isReportKey(kind, key)) return notFound(reply);
+    const found = await loadReport(kind, key);
     if (!found) return notFound(reply);
     const r = en ? await english.inEnglish(found, english.reportHeading) : found;
     const count = r.sections.reduce((n, s) => n + s.items.length, 0);
@@ -113,7 +121,7 @@ function registerIn(app: FastifyInstance, lang: Locale) {
       }, 3600, CONTENT_IMAGE_CACHE);
     }
     return send(req, reply, {
-      kicker: `${REPORT_NAMES[r.kind]} · ${reportDateLabel(r.kind, r.key)}`,
+      kicker: `${withSubject(REPORT_NAMES[r.kind])} · ${reportDateLabel(r.kind, r.key)}`,
       title: r.lead?.title ?? r.title,
       subtitle: r.lead?.leadParagraph ?? r.overview,
       meta: count > 0 ? `${count} ${REPORTS.shareUnit} · 约 ${r.readingMinutes} 分钟读完` : null,

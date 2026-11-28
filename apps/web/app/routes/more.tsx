@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { useRouteLoaderData } from "react-router";
 import { POLICY, SITE } from "@aihot/site";
 import { ENGLISH } from "@aihot/contracts/english";
@@ -9,6 +9,7 @@ import { PhoneBar } from "../components/shell/PhoneBar";
 import { topicsInNav } from "../components/shell/nav";
 import type { Screen } from "../components/shell/screens";
 import { edgeTtl } from "../lib/api.server";
+import { useHydrated } from "../lib/hydration";
 import { webModules } from "../site-modules";
 import { pageMeta } from "../lib/seo";
 import { useStarred } from "../lib/local-state";
@@ -86,8 +87,7 @@ export default function MorePage() {
   const changelogDot = useChangelogDot(root?.changelogVersion ?? null);
   const starred = useStarred();
   // The count is this browser's: shown once the page runs here, never in the shared server copy.
-  const [here, setHere] = useState(false);
-  useEffect(() => setHere(true), []);
+  const here = useHydrated();
   const Account = webModules().find((m) => m.account)?.account;
   return (
     <div className="mx-auto max-w-[var(--page-max-reading)] pb-8">
@@ -102,7 +102,7 @@ export default function MorePage() {
               <IconMoon size={20} />
             </span>
             <span className="flex-1">{t("外观", "Appearance")}</span>
-            <ThemeSwitch className="w-[126px]" />
+            <ThemeSwitch className="w-[138px]" />
           </li>
           <li className="flex min-h-[56px] items-center gap-3 px-4 text-ui-body-lg font-medium text-ink">
             <span className="w-5 text-center text-ink-3" aria-hidden="true">Aa</span>
@@ -119,7 +119,7 @@ export default function MorePage() {
             </li>
           )}
         </Group>
-        <Group title={t("工具与入口", "Tools")}>
+        <Group title={t("工具", "Tools")}>
           {tools().map((r) => (
             <RowLink key={r.to} row={r} />
           ))}
@@ -127,7 +127,7 @@ export default function MorePage() {
         <Group title={t("关于", "About")}>
           <RowLink row={{ to: "/about", label: L(`关于 ${SITE.name}`, `About ${SITE.name}`), icon: <IconHeart size={20} /> }} />
           <RowLink row={{ to: "/changelog", label: L("更新日志", "Changelog"), icon: <IconSparkles size={20} /> }} dot={changelogDot} />
-          <RowLink row={{ to: "/feedback", label: L("意见反馈", "Feedback"), icon: <IconMessage size={20} /> }} />
+          <RowLink row={{ to: "/feedback", label: L("反馈", "Feedback"), icon: <IconMessage size={20} /> }} />
         </Group>
       </div>
       <div className="mt-6 flex flex-wrap justify-center gap-x-4 gap-y-1 text-ui-caption leading-[2] text-ink-4">

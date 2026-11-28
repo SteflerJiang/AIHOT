@@ -26,14 +26,17 @@ import { chatJson } from "../providers/llm.ts";
 import { completeReceipt, failedReceiptId, failureKind } from "../providers/receipts.ts";
 import { embeddingsAvailable } from "../providers/embeddings.ts";
 import { isHistorical, newsCondition } from "../content/materials.ts";
-import { articlePriority, enqueue, QUEUES, shutdownSignal } from "../jobs/queue.ts";
+import { quotedTweetIdSql } from "../content/posts.ts";
+import { articlePriority, enqueue, QUEUES } from "../jobs/queue.ts";
+import { shutdownSignal } from "../lib/shutdown.ts";
 import { syncArticleEventCopyTx } from "./copy.ts";
 import { editorialPolicy } from "../modules.ts";
 import { publishArticle, publishArticleTx, republishTx } from "../publication/publish.ts";
 import { isIndependentSelectedSource } from "../publication/rules.ts";
 import { groupingEvidenceCondition, latestCompositeCondition } from "../publication/scope.ts";
 import { alreadyOnCard, echoesOnCard, factHasCard, foldsUnder, ownArticleOnCard, readerOf, retireCardTx, seenOnCard } from "./cards.ts";
-import { consolidate, liveStory, type Consolidation } from "./consolidate.ts";
+import { survivingStory } from "./identity.ts";
+import { consolidate, type Consolidation } from "./consolidate.ts";
 import { HEAT_WINDOW_HOURS } from "./hot.ts";
 import { mergeFactInto, mergeStoryInto } from "./merge.ts";
 import { bestPerFact, candidateViews, cosine32, RECALL_DAYS, recallFacts, recallFactsByPosts, recallSelectedBackground, relatedPosts, vectorsFor, type Recalled, type CardRow } from "./recall.ts";
@@ -116,23 +119,22 @@ async function judgeSignal(articleId: string, query: ReportView, cands: Candidat
 
 // Writes
 
-async function createStory(db: Db, title: string, at: Date): Promise<number> {
-  const cleanTitle = editorialPolicy().sanitizeEventCopy
-    ? editorialPolicy().sanitizeEventCopy!({ title }).title
-    : title;
+async function createStory(db: Db, title: string, at: Date, reportContext: string): Promise<number> {
+  const cleanTitle = editorialPolicy().sanitizeEventCopy?.({ title, reportContext }).title ?? title;
   const [row] = await db<{ id: number }[]>`
     INSERT INTO stories (public_id, title, first_report_at, latest_at, origin)
     VALUES (${newUuid()}, ${cleanTitle}, ${at}, ${at}, 'model') RETURNING id`;
   return row!.id;
 }
 
-async function createFact(db: Db, storyId: number, title: string, frame: Record<string, any> | null, at: Date): Promise<number> {
+async function createFact(db: Db, storyId: number, title: string, frame: Record<string, any> | null, at: Date, reportContext: string): Promise<number> {
   let occurred = typeof frame?.occurredAt === "string" && /^\d{4}-\d{2}-\d{2}$/.test(frame.occurredAt) ? beijingMidnight(frame.occurredAt) : null;
   if (occurred && (!Number.isFinite(+occurred) || beijingDate(occurred) !== frame!.occurredAt)) occurred = null;
   const rawConditions = Array.isArray(frame?.conditions) ? frame.conditions.map((c: { text?: string }) => c.text).filter(Boolean).join("；") || null : null;
   const cleaned = editorialPolicy().sanitizeEventCopy
     ? editorialPolicy().sanitizeEventCopy!({
         title,
+        reportContext,
         conditions: rawConditions,
         subject: frame?.subject ?? null,
         action: frame?.action ?? null,
@@ -546,8 +548,9 @@ async function decide(articleId: string, opts: GroupOptions, revision: number, r
       const [current] = await tx`SELECT id FROM stories WHERE id = ${storyId} AND merged_into IS NULL FOR UPDATE`;
       if (!current) throw new Error("Grouping target changed; retry against the current story");
     }
-    const story = storyId ?? (await createStory(tx, newTitle, observedAt));
-    const fact = factId ?? (await createFact(tx, story, newTitle, frame, observedAt));
+    const reportContext = [a.title, an.title_zh, an.summary_zh].filter(Boolean).join("\n");
+    const story = storyId ?? (await createStory(tx, newTitle, observedAt, reportContext));
+    const fact = factId ?? (await createFact(tx, story, newTitle, frame, observedAt, reportContext));
     const [hasPrimary] = await tx<{ n: number }[]>`SELECT count(*) AS n FROM fact_articles WHERE fact_id = ${fact} AND role = 'primary'`;
     const role = a.first_party && Number(hasPrimary?.n ?? 0) === 0 ? "primary" : "report";
     const suppressEvidence = Boolean(an?.output?.suppressOriginal);
@@ -571,7 +574,8 @@ async function decide(articleId: string, opts: GroupOptions, revision: number, r
   if (tied.size > 1) {
     try {
       result.consolidated = await consolidate([...tied]);
-      result.storyId = (await liveStory(written.storyId!)) ?? written.storyId!;
+      const [story] = await survivingStory(written.storyId!);
+      result.storyId = story?.id ?? written.storyId!;
     } catch (error) {
       result.consolidationError = String(error).slice(0, 300);
     }
@@ -619,7 +623,7 @@ async function reclaimWaiting(tweetId: string): Promise<number> {
   const posts = await sql<{ id: string }[]>`
     SELECT a.id FROM articles a JOIN sources s ON s.id = a.source_id
     WHERE a.discovered_at > now() - make_interval(hours => ${WAIT_HOURS}) AND ${unattachedSignal}
-      AND (a.x_post->>'replyTo' = ${tweetId} OR coalesce(a.x_post->'quoted'->>'tweetId', substring(a.x_post->'quoted'->>'url' from '/status/([0-9]+)')) = ${tweetId})`;
+      AND (a.x_post->>'replyTo' = ${tweetId} OR ${quotedTweetIdSql()} = ${tweetId})`;
   for (const p of posts) await enqueue(QUEUES.group, { articleId: p.id, signalOnly: true }, { singletonKey: p.id, priority: articlePriority({ signal: true, historical: false }) });
   return posts.length;
 }

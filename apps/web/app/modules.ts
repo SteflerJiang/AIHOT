@@ -114,7 +114,7 @@ export interface WebModule {
   account?: ComponentType<{ place: AccountPlace }>;
   /** The email of the reader signed in in this browser, or null (read after hydration). */
   signedInEmail?: () => string | null;
-  /** Desktop sidebar: entries in a section between the engine's 内容 and 更多; modules sharing sectionKey (or section title) share it. */
+  /** Desktop sidebar: entries in a section between the engine's 内容 and its last one (关于, 更新日志…); modules sharing sectionKey (or section title) share it. */
   sidebar?: { sectionKey?: string; section: Text; items: NavItem[] };
   /** Phone tab bar: tabs before 我的. */
   tabs?: Tab[];
@@ -128,8 +128,8 @@ export interface WebModule {
     Top?: ComponentType;
     /** After the page. */
     Bottom?: ComponentType;
-    /** Headers the document's own request to the api carries (the root loader). */
-    documentHeaders?: (request: Request) => Record<string, string>;
+    /** Headers for a counted page, sent to the API after its HTTP status is known. */
+    documentHeaders?: (request: Request) => Record<string, string> | undefined;
   };
   agent?: Part<AgentPart>;
   topicPage?: Part<TopicPagePart>;

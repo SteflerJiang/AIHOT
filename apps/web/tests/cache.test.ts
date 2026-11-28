@@ -1,30 +1,25 @@
-import { pollFor } from "../../../tests/poll.ts";
 // Run after `npm run build -w @aihot/web`. Real production server/router, synthetic HTTP API only.
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { ADMIN } from "@aihot/site";
 import { SIGN_IN_HOME } from "@aihot/contracts/admin";
+import { ENGLISH } from "@aihot/contracts/english";
 import { isPrivatePage } from "@aihot/contracts/http-policy";
 import { CATEGORY_KEYS } from "@aihot/contracts/taxonomy";
 import { UNSAFE_decodeViaTurboStream } from "react-router";
+import { pollFor } from "../../../tests/poll.ts";
 import { fakeApi, startWebServer, type WebServer } from "./web-server.ts";
 
 let web: WebServer;
 let origin: string;
 let deadline: number;
-/** Root metadata answers only after the selected deadline has passed: a slow sibling loader. */
-let metaAfterDeadline = false;
+let contactQr = "/qr.png";
 const apiCookies: Array<string | undefined> = [];
 const api = fakeApi(async (url, res, req) => {
   apiCookies.push(req.headers.cookie);
+  if (/^\/api\/site(?:\/en)?\/items\/long-lived(?:\/original)?$/.test(url.pathname)) return { id: "long-lived", title: url.pathname };
   // The English edition's answers (/api/site/en/…) as the Chinese ones here.
   if (url.pathname.startsWith("/api/site/en/")) url.pathname = url.pathname.replace("/api/site/en/", "/api/site/");
-  if (url.pathname === "/api/site/meta") {
-    // Past the deadline on the wall clock the server reads: timers run on another clock, and a CI VM
-    // stepping its wall clock back mid-wait would otherwise answer before the deadline.
-    if (metaAfterDeadline) await pollFor(() => Date.now() >= deadline * 1000 + 50, "upstream cache expiry");
-    return { changelogVersion: "2026-09-28T12:00" };
-  }
   if (url.pathname === "/api/site/timeline") {
     const filters = { channel: "all", category: url.searchParams.get("category"), tag: null };
     res.setHeader("X-Accel-Expires", `@${deadline}`);
@@ -41,8 +36,7 @@ const api = fakeApi(async (url, res, req) => {
     res.setHeader("Content-Disposition", 'attachment; filename="article.md"');
     return res.end("# Article");
   }
-  if (url.pathname === "/api/site/items/long-lived") return { id: "long-lived", title: "t" };
-  if (url.pathname === "/api/site/contact") return { wechatQr: "/qr.png", feishuQr: "/qr.png" };
+  if (url.pathname === "/api/site/contact") return { wechatQr: contactQr, feishuQr: "/qr.png" };
   if (url.pathname === "/api/site/stories/merged") {
     res.statusCode = 308;
     return { mergedInto: "surviving-story" };
@@ -154,7 +148,7 @@ test("gray pages are private like the admin's, whatever their route asks for", a
   }
 });
 
-test("browser freshness shares the selected deadline, including slow sibling loaders", async () => {
+test("browser freshness shares the selected deadline and never renews an expired upstream result", async () => {
   const savedDeadline = deadline;
   try {
     deadline = Math.floor(Date.now() / 1000) + 20;
@@ -170,10 +164,7 @@ test("browser freshness shares the selected deadline, including slow sibling loa
       assert.doesNotMatch(cc, /stale/);
       await res.text();
     }
-    // The selected loader initially grants a positive TTL (at least a whole second), but root metadata
-    // finishes after it.
-    deadline = Math.floor(Date.now() / 1000) + 2;
-    metaAfterDeadline = true;
+    deadline = Math.floor(Date.now() / 1000) - 1;
     await Promise.all(["/", "/_.data?_routes=routes%2Fhome"].map(async (pathname) => {
       const res = await fetch(origin + pathname);
       assert.equal(res.status, 200);
@@ -183,17 +174,18 @@ test("browser freshness shares the selected deadline, including slow sibling loa
     }));
   } finally {
     deadline = savedDeadline;
-    metaAfterDeadline = false;
   }
 });
 
 // A withdrawal purges the list pages at their bare addresses (modules/ops/backend/purge.ts): a filtered or later page
-// is an entry of its own at the edge, gone only when it expires. So these stay there a minute at most, in both languages.
+// is an entry of its own at the edge, gone only when it expires. Check every language the site serves.
 test("filtered and later list pages stay in shared caches a minute at most", async () => {
+  const pathnames = ["/?tag=x", "/?category=ai-models", "/_.data?tag=x", "/all?page=2", "/all.data?page=2"];
+  if (ENGLISH) pathnames.push("/en?tag=x", "/en.data?tag=x", "/en/all?page=2", "/en/all.data?page=2");
   const savedDeadline = deadline;
   try {
     deadline = Math.floor(Date.now() / 1000) + 3600;
-    for (const pathname of ["/?tag=x", "/?category=ai-models", "/_.data?tag=x", "/all?page=2", "/all.data?page=2", "/en?tag=x", "/en.data?tag=x", "/en/all?page=2", "/en/all.data?page=2"]) {
+    for (const pathname of pathnames) {
       const res = await fetch(origin + pathname);
       const cc = res.headers.get("Cache-Control") ?? "";
       assert.equal(res.status, 200, pathname);
@@ -206,13 +198,62 @@ test("filtered and later list pages stay in shared caches a minute at most", asy
   }
 });
 
-test("a shared cache may keep an item page longer than browsers", async () => {
-  const res = await fetch(`${origin}/items/long-lived.data`);
-  assert.equal(res.status, 200);
-  const cc = res.headers.get("Cache-Control")!;
-  assert.equal(Number(cc.match(/(?:^|,)\s*max-age=(\d+)/)![1]), 300);
-  assert.ok(Number(cc.match(/(?:^|,)\s*s-maxage=(\d+)/)![1]) > 300);
-  await res.text();
+test("article editions read the chosen text and share the same browser and edge lifetimes", async () => {
+  const item = "/items/long-lived";
+  const editions: Array<[string, string]> = [[item, item], [item + "/original", item + "/original"]];
+  if (ENGLISH) editions.push(["/en" + item, "/en" + item], ["/en" + item + "/original", "/en" + item]);
+  for (const [page, source] of editions) {
+    const res = await fetch(origin + page + ".data");
+    assert.equal(res.status, 200, page);
+    const cc = res.headers.get("Cache-Control")!;
+    assert.equal(Number(cc.match(/(?:^|,)\s*max-age=(\d+)/)![1]), 300, page);
+    assert.ok(Number(cc.match(/(?:^|,)\s*s-maxage=(\d+)/)![1]) > 300, page);
+    assert.ok((await res.text()).includes(JSON.stringify("/api/site" + source)), page);
+  }
+});
+
+// A CDN in front revalidates each copy as it expires; an unchanged page must cost a 304, not the page again, even
+// though its clock values (expiresAt, serverNow) moved since the copy was rendered.
+test("an unchanged shared page answers revalidation with an empty 304; a changed one is sent again", async () => {
+  for (const pathname of ["/about", "/items/long-lived.data"]) {
+    const first = await fetch(origin + pathname);
+    const tag = first.headers.get("ETag") ?? "";
+    assert.match(tag, /^W\/"p-[0-9a-f]{16}"$/, pathname);
+    const clock = (body: string) => body.match(/expiresAt\\?",(\d+)/)?.[1];
+    const rendered = clock(await first.text());
+    assert.ok(rendered, `${pathname} carries a clock value`);
+    // A later render of the same content, once its clock value has moved on.
+    await pollFor(async () => {
+      const later = await fetch(origin + pathname);
+      return later.headers.get("ETag") === tag && clock(await later.text()) !== rendered;
+    }, `${pathname} rendered with a later clock value`);
+    const again = await fetch(origin + pathname, { headers: { "If-None-Match": tag } });
+    assert.equal(again.status, 304, pathname);
+    assert.equal(await again.text(), "");
+    assert.equal(again.headers.get("ETag"), tag);
+    assert.match(again.headers.get("Cache-Control")!, /^public, max-age=\d+, s-maxage=\d+, must-revalidate$/, pathname);
+    const stale = await fetch(origin + pathname, { headers: { "If-None-Match": 'W/"p-0000000000000000"' } });
+    assert.equal(stale.status, 200, pathname);
+    assert.equal(Number(stale.headers.get("Content-Length")), Buffer.byteLength(await stale.text()), pathname);
+  }
+  const before = await fetch(`${origin}/about`);
+  const tag = before.headers.get("ETag")!;
+  await before.text();
+  contactQr = "/qr-new.png";
+  try {
+    const changed = await fetch(`${origin}/about`, { headers: { "If-None-Match": tag } });
+    assert.equal(changed.status, 200);
+    assert.notEqual(changed.headers.get("ETag"), tag);
+    assert.match(await changed.text(), /qr-new\.png/);
+  } finally {
+    contactQr = "/qr.png";
+  }
+  for (const pathname of ["/items/missing", "/items/missing.data"]) {
+    const missing = await fetch(origin + pathname);
+    assert.equal(missing.status, 404, pathname);
+    assert.equal(missing.headers.get("ETag"), null, `${pathname}: only shared successful pages carry a fingerprint`);
+    await missing.text();
+  }
 });
 
 // A tab opened before a page lost its loader still asks for that page's result, and its router rejects
@@ -280,4 +321,35 @@ test("a web server assigned port zero serves its own canonical address", async (
     assert.equal(response.status, 200);
     assert.ok((await response.text()).includes(`rel="canonical" href="${ephemeral.origin}/about"`));
   } finally { await ephemeral.stop(); }
+});
+
+test("public routes turn upstream 503 into 503 instead of 500", async () => {
+  const routeApi = fakeApi((url, res) => {
+    if (url.pathname === "/api/site/reports/daily/2026-10-15") {
+      return {
+        kind: "daily", key: "2026-10-15", title: "日报", generatedAt: new Date().toISOString(),
+        lead: null, leadItemId: null, overview: null, sections: [], flashes: [], metrics: {},
+      };
+    }
+    if ([
+      "/api/site/changelog",
+      "/api/site/reports/daily",
+      "/api/site/topics",
+      "/api/site/reports/daily/navigation/2026-10-15",
+    ].includes(url.pathname)) {
+      res.statusCode = 503;
+      return { code: "unavailable" };
+    }
+  });
+  const srv = await startWebServer(routeApi);
+  try {
+    for (const pathname of ["/changelog", "/daily/archive", "/topics", "/daily/2026-10-15"]) {
+      const res = await fetch(srv.origin + pathname);
+      assert.equal(res.status, 503, pathname);
+      assert.equal(res.headers.get("Cache-Control"), "private, no-store", pathname);
+      await res.text();
+    }
+  } finally {
+    await srv.stop();
+  }
 });

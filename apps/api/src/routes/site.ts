@@ -2,10 +2,12 @@
 // Reads through the same public read layer as v1; no cookies are read or set. A site with an English edition
 // also answers what readers read in English, under /api/site/en/* (publication/english.ts).
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { ENGLISH } from "@aihot/contracts/english";
+import { readingApi, READER_LANGUAGES } from "@aihot/contracts/english";
 import type { Locale } from "@aihot/contracts/i18n";
-import { isCategoryKey, isChannelKey, type CategoryKey, type ChannelKey } from "@aihot/contracts/taxonomy";
-import type { ReportIndexResponse, ReportLatestPage, ReportNavigationResponse, SearchSuggestions, SiteContact } from "@aihot/contracts/site";
+import { ARTICLE_ID_PATTERN, isCategoryKey, isChannelKey, type CategoryKey } from "@aihot/contracts/taxonomy";
+import { isReportKey, isReportKind, type ReportIndexResponse, type ReportLatestPage, type ReportNavigationResponse } from "@aihot/contracts/reports";
+import type { SearchSuggestions, SiteContact, TimelineFilters } from "@aihot/contracts/site";
+import { monthRange } from "@aihot/contracts/time";
 import { InvalidCursorError } from "@aihot/backend/lib/cursor";
 import { exportMarkdown, loadItemDetail } from "@aihot/backend/publication/detail";
 import { itemUrl } from "@aihot/backend/publication/links";
@@ -22,8 +24,8 @@ import { listTopicSummaries, loadTopicPage, topicBrowseLinks } from "@aihot/back
 import * as english from "@aihot/backend/publication/english";
 import { registerFeedback } from "./feedback.ts";
 import { loadHot, loadStoryDetail, resolveStory } from "@aihot/backend/publication/stories";
-import { listReports, loadReport, reportNavigation, loadReportNavigation, loadReportMonth, type ReportKind } from "@aihot/backend/publication/reports";
-import { looseQuery, QueryError, sendJsonWithEtag, sendProblem } from "../http/respond.ts";
+import { listReports, loadReport, reportNavigation, loadReportNavigation, loadReportMonth } from "@aihot/backend/publication/reports";
+import { clampedInt, looseQuery, QueryError, sendJsonWithEtag, sendProblem } from "../http/respond.ts";
 
 type Handler = (req: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
 
@@ -46,13 +48,7 @@ export function siteHandler(fn: Handler): Handler {
   };
 }
 
-export interface FilterParams {
-  channel: ChannelKey;
-  category: CategoryKey | null;
-  tag: string | null;
-}
-
-export function parseFilters(q: Record<string, string>): FilterParams {
+function parseFilters(q: Record<string, string>): TimelineFilters {
   const channel = q.channel ?? "all";
   if (!isChannelKey(channel)) throw new BadRequest("invalid channel");
   const category = q.category ?? null;
@@ -61,11 +57,6 @@ export function parseFilters(q: Record<string, string>): FilterParams {
   return { channel, category: category as CategoryKey | null, tag };
 }
 
-/**
- * Where each language's answers live: the Chinese under /api/site, the English under /api/site/en (only on a site
- * with an English edition). The path decides the language, so a cache keyed by URL never mixes the two.
- */
-const LANGUAGES: Array<{ lang: Locale; base: string }> = [{ lang: "zh", base: "/api/site" }, ...(ENGLISH ? [{ lang: "en" as const, base: "/api/site/en" }] : [])];
 
 export function registerSite(app: FastifyInstance) {
   app.get("/api/site/meta", siteHandler(async (req, reply) => {
@@ -78,18 +69,14 @@ export function registerSite(app: FastifyInstance) {
     return sendJsonWithEtag(req, reply, body, { etagPrefix: "contact", cacheControl: "public, max-age=300, s-maxage=300" });
   }));
 
-  app.get("/api/site/changelog", siteHandler(async (req, reply) => {
-    return sendJsonWithEtag(req, reply, loadChangelog(), { etagPrefix: "changelog", cacheControl: "public, max-age=300, s-maxage=300" });
-  }));
-
   registerFeedback(app);
 
-  for (const { lang, base } of LANGUAGES) registerReading(app, lang, base);
+  for (const lang of READER_LANGUAGES) registerReading(app, lang, readingApi("", lang));
 
   // Markdown export: attachment, 404 when there is nothing to export (same predicate as the button).
   app.get("/items/:id/markdown", siteHandler(async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id)) return reply.code(404).type("text/plain; charset=utf-8").send("Not found");
+    if (!ARTICLE_ID_PATTERN.test(id)) return reply.code(404).type("text/plain; charset=utf-8").send("Not found");
     const md = await exportMarkdown(id);
     if (!md) return reply.code(404).header("Cache-Control", "public, max-age=60").type("text/plain; charset=utf-8").send("Not found");
     return reply
@@ -109,10 +96,13 @@ function registerReading(app: FastifyInstance, lang: Locale, base: string) {
   const send = async <T>(req: FastifyRequest, reply: FastifyReply, data: T, overlay: english.Overlay<T>, opts: { etagPrefix: string; cacheControl: string }) =>
     sendJsonWithEtag(req, reply, await shown(data, overlay), { ...opts, etagPrefix: en ? `en-${opts.etagPrefix}` : opts.etagPrefix });
 
+  app.get(`${base}/changelog`, siteHandler(async (req, reply) =>
+    send(req, reply, loadChangelog(), english.changelog, { etagPrefix: "changelog", cacheControl: "public, max-age=300, s-maxage=300" })));
+
   app.get(`${base}/timeline`, siteHandler(async (req, reply) => {
     const q = looseQuery(req);
     const filters = parseFilters(q);
-    const limit = Math.min(Math.max(Number(q.limit) || 20, 1), 40);
+    const limit = clampedInt(q.limit, 1, 40, 20);
     const unfiltered = filters.channel === "all" && !filters.category && !filters.tag && !q.cursor;
     const [data, hot] = await Promise.all([
       loadTimeline({ ...filters, cursor: q.cursor || null, limit }),
@@ -126,7 +116,7 @@ function registerReading(app: FastifyInstance, lang: Locale, base: string) {
   app.get(`${base}/pool`, siteHandler(async (req, reply) => {
     const q = looseQuery(req);
     const filters = parseFilters(q);
-    const page = Math.min(Math.max(Number(q.page) || 1, 1), 50);
+    const page = clampedInt(q.page, 1, 50, 1);
     const search = q.q?.trim() ? q.q.trim().slice(0, 200) : null;
     const tab = q.tab === "relevance" ? "relevance" : "time";
     return send(req, reply, await loadPool({ ...filters, q: search, tab, page }), english.pool, { etagPrefix: "pool", cacheControl: "public, max-age=60, s-maxage=60" });
@@ -135,7 +125,7 @@ function registerReading(app: FastifyInstance, lang: Locale, base: string) {
   // An English page reads an article's original: no body is translated into English.
   app.get(`${base}/items/:id`, siteHandler(async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id)) return sendProblem(req, reply, { status: 404, code: "not_found", detail: "item not found" });
+    if (!ARTICLE_ID_PATTERN.test(id)) return sendProblem(req, reply, { status: 404, code: "not_found", detail: "item not found" });
     const result = await loadItemDetail(id, en ? "original" : "zh");
     if (result.kind === "not_found") return sendProblem(req, reply, { status: 404, code: "not_found", detail: "item not found", cacheControl: "public, max-age=60" });
     return send(req, reply, result.item, english.itemDetail, { etagPrefix: "item", cacheControl: "public, max-age=60, s-maxage=60" });
@@ -144,7 +134,7 @@ function registerReading(app: FastifyInstance, lang: Locale, base: string) {
   if (!en) {
     app.get(`${base}/items/:id/original`, siteHandler(async (req, reply) => {
       const id = (req.params as { id: string }).id;
-      if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id)) return sendProblem(req, reply, { status: 404, code: "not_found", detail: "item not found" });
+      if (!ARTICLE_ID_PATTERN.test(id)) return sendProblem(req, reply, { status: 404, code: "not_found", detail: "item not found" });
       const result = await loadItemDetail(id, "original");
       if (result.kind === "not_found") return sendProblem(req, reply, { status: 404, code: "not_found", detail: "item not found", cacheControl: "public, max-age=60" });
       return sendJsonWithEtag(req, reply, result.item, { etagPrefix: "item-original", cacheControl: "public, max-age=60, s-maxage=60" });
@@ -209,41 +199,41 @@ function registerReading(app: FastifyInstance, lang: Locale, base: string) {
 
   app.get(`${base}/reports/:kind`, siteHandler(async (req, reply) => {
     const kind = (req.params as { kind: string }).kind;
-    if (!["daily", "weekly", "monthly"].includes(kind)) return sendProblem(req, reply, { status: 404, code: "not_found", detail: "unknown report kind" });
-    const body: ReportIndexResponse = { kind: kind as ReportKind, items: await listReports(kind as ReportKind) };
+    if (!isReportKind(kind)) return sendProblem(req, reply, { status: 404, code: "not_found", detail: "unknown report kind" });
+    const body: ReportIndexResponse = { kind, items: await listReports(kind) };
     return send(req, reply, body, english.reportIndex, { etagPrefix: "reports", cacheControl: "public, max-age=60, s-maxage=60" });
   }));
 
   // The latest report page needs its archive selector and the report in one HTTP request.
   app.get(`${base}/reports/:kind/latest-page`, siteHandler(async (req, reply) => {
     const kind = (req.params as { kind: string }).kind;
-    if (!["daily", "weekly", "monthly"].includes(kind)) return sendProblem(req, reply, { status: 404, code: "not_found", detail: "unknown report kind" });
-    const index = await listReports(kind as ReportKind);
-    const report = index[0] ? await loadReport(kind as ReportKind, index[0].key) : null;
-    const body: ReportLatestPage = { index: reportNavigation(kind as ReportKind, index, report?.key ?? ""), report };
+    if (!isReportKind(kind)) return sendProblem(req, reply, { status: 404, code: "not_found", detail: "unknown report kind" });
+    const index = await listReports(kind);
+    const report = index[0] ? await loadReport(kind, index[0].key) : null;
+    const body: ReportLatestPage = { index: reportNavigation(kind, index, report?.key ?? ""), report };
     return send(req, reply, body, english.reportLatest, { etagPrefix: "report-latest", cacheControl: "public, max-age=60, s-maxage=60" });
   }));
 
   app.get(`${base}/reports/:kind/navigation/:key`, siteHandler(async (req, reply) => {
     const { kind, key } = req.params as { kind: string; key: string };
-    if (!["daily", "weekly", "monthly"].includes(kind) || !/^\d{4}-(\d{2}(-\d{2})?|W\d{2})$/.test(key)) return sendProblem(req, reply, { status: 404, code: "not_found", detail: "report not found" });
-    const body: ReportNavigationResponse = { items: await loadReportNavigation(kind as ReportKind, key) };
+    if (!isReportKind(kind) || !isReportKey(kind, key)) return sendProblem(req, reply, { status: 404, code: "not_found", detail: "report not found" });
+    const body: ReportNavigationResponse = { items: await loadReportNavigation(kind, key) };
     return send(req, reply, body, english.reportNavigation, { etagPrefix: "report-navigation", cacheControl: "public, max-age=60, s-maxage=60" });
   }));
 
   app.get(`${base}/reports/daily/months/:month`, siteHandler(async (req, reply) => {
     const { month } = req.params as { month: string };
-    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return sendProblem(req, reply, { status: 404, code: "not_found", detail: "month not found" });
+    if (!monthRange(month)) return sendProblem(req, reply, { status: 404, code: "not_found", detail: "month not found" });
     const body: ReportNavigationResponse = { items: await loadReportMonth("daily", month) };
     return send(req, reply, body, english.reportNavigation, { etagPrefix: "report-month", cacheControl: "public, max-age=60, s-maxage=60" });
   }));
 
   app.get(`${base}/reports/:kind/:key`, siteHandler(async (req, reply) => {
     const { kind, key } = req.params as { kind: string; key: string };
-    if (!["daily", "weekly", "monthly"].includes(kind) || !/^\d{4}-(\d{2}(-\d{2})?|W\d{2})$/.test(key)) {
+    if (!isReportKind(kind) || !isReportKey(kind, key)) {
       return sendProblem(req, reply, { status: 404, code: "not_found", detail: "report not found" });
     }
-    const data = await loadReport(kind as ReportKind, key);
+    const data = await loadReport(kind, key);
     if (!data) return sendProblem(req, reply, { status: 404, code: "not_found", detail: "report not found", cacheControl: "public, max-age=60" });
     return send(req, reply, data, english.report, { etagPrefix: "report", cacheControl: "public, max-age=120, s-maxage=120" });
   }));

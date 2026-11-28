@@ -10,7 +10,6 @@ import { failureKind } from "../providers/receipts.ts";
 import { logError } from "../lib/log-error.ts";
 import { serverModules, type ModuleQueue } from "../modules.ts";
 import { runOwner } from "./runs.ts";
-export { shutdownSignal } from "../lib/shutdown.ts";
 
 let boss: PgBoss | null = null;
 let starting: Promise<PgBoss> | null = null;
@@ -25,7 +24,7 @@ export interface JobData {
   "sources.mp": { sourceId: string; reason?: "schedule" | "manual" };
   "notify.selected": { articleId: string; attempt?: number };
   "publication.republish-source": { sourceId: string };
-  "media.prepare": { articleId: string } | { url: string; mode: string; format?: "avif" };
+  "media.prepare": { articleId: string } | { url: string; mode: string; format?: "avif" | "mp4" };
 }
 export type QueueName = keyof JobData;
 

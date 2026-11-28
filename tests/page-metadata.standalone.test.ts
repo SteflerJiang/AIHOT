@@ -21,7 +21,8 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { after, before, test } from "node:test";
 import * as cheerio from "cheerio";
-import { reportDateLabel, type FeedItemSummary, type ReportCitation, type ReportDetail, type ReportKind, type SiteItemDetail, type StoryDetail, type TopicPage } from "@aihot/contracts/site";
+import { reportDateLabel, type ReportCitation, type ReportDetail, type ReportKind } from "@aihot/contracts/reports";
+import type { FeedItemSummary, SiteItemDetail, StoryDetail, TopicPage } from "@aihot/contracts/site";
 import { ENGLISH } from "@aihot/contracts/english";
 import { SEO_TITLES, SITE, withSubject } from "@aihot/site";
 import { articleLd, readFilters, reportLd } from "../apps/web/app/lib/seo.ts";
@@ -34,6 +35,7 @@ const detail: SiteItemDetail = { ...item, x: null, originalTitle: null, links: {
 /** Article pages by id: the fixture, one kept from Google only, one kept from every engine. */
 const details: Record<string, SiteItemDetail> = {
   [item.id]: detail,
+  "metadata-english": { ...detail, id: "metadata-english", title: "Translated headline" },
   "metadata-short": { ...detail, id: "metadata-short", googleNoindex: true },
   "metadata-hidden": { ...detail, id: "metadata-hidden", selected: false, indexable: false },
   "metadata-undated": { ...detail, id: "metadata-undated", publishedAt: null, discoveredAt: "2026-10-04T07:30:00.000Z" },
@@ -70,7 +72,6 @@ const api = createServer((req, res) => {
   const path = url.pathname.replace(/^\/api\/site\/en\//, "/api/site/");
   res.setHeader("Content-Type", "application/json");
   const send = (value: unknown) => res.end(JSON.stringify(value));
-  if (path === "/api/site/meta") return send({ changelogVersion: "fixture" });
   if (path === "/api/health") return send({ ok: true });
   if (path === "/api/site/hot") return send({ computedAt: at, windowHours: 48, entries: [] });
   if (path === "/api/site/timeline") return send({ filters: readFilters(url.searchParams), cards: [{ key: item.id, anchorAt: at, item, group: null }], nextCursor: null, hot: null, dayCounts: { "2026-10-04": 1 } });
@@ -260,6 +261,32 @@ test("an article whose own text is a summary's worth asks only Google not to ind
   const hidden = await page("/items/metadata-hidden");
   assert.equal(hidden("meta[name=robots]").attr("content"), "noindex, follow");
   assert.equal(hidden("meta[name=googlebot]").length, 0, "robots already covers Google");
+});
+
+test("HTML and navigation keep a temporary English-title noindex for at most a minute", { skip: ENGLISH === null }, async () => {
+  const cases = [
+    [`/en/items/${item.id}`, true, true],
+    [`/en/items/${item.id}/original`, true, true],
+    [`/en/story/${severalReports.publicId}`, true, true],
+    ...(["daily", "weekly", "monthly"] as const).map((kind) => [`/en/${kind}/${report(kind).key}`, true, true] as const),
+    [`/en/daily/${leadless().key}`, false, false], // The issue date stands on its own.
+    [`/en/story/${sameSourceStory.publicId}`, false, true],
+    ["/en/items/metadata-hidden", false, true],
+    ["/en/items/metadata-english", false, false],
+    [`/items/${item.id}`, false, false],
+  ] as const;
+  for (const [path, waiting, noindex] of cases) {
+    for (const suffix of ["", ".data"]) {
+      const response = await fetch(web.origin + path + suffix);
+      assert.equal(response.status, 200, path);
+      const seconds = Number(response.headers.get("Cache-Control")?.match(/s-maxage=(\d+)/)?.[1]);
+      assert.ok(seconds > 0 && (waiting ? seconds <= 60 : seconds > 60), `${path}${suffix}: ${seconds}`);
+      if (!suffix) {
+        const $ = cheerio.load(await response.text());
+        assert.equal($("meta[name=robots]").attr("content")?.includes("noindex"), noindex, path);
+      } else await response.arrayBuffer();
+    }
+  }
 });
 
 test("English pages share the English cards; Chinese pages keep theirs", { skip: ENGLISH === null }, async () => {

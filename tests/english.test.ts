@@ -251,6 +251,16 @@ test("once the worker has run, English answers carry no Chinese the site wrote, 
   assert.deepEqual(await get("/api/site/timeline"), chineseBefore, "Chinese answers never read the English");
   assert.deepEqual(await get("/api/site/reports/weekly/2099-W01"), reportBefore);
 
+  const releases = (await get("/api/site/changelog")).releases;
+  const translated = (await get("/api/site/en/changelog")).releases;
+  assert.deepEqual(translated.map((r: { id: string }) => r.id), releases.map((r: { id: string }) => r.id));
+  for (const [i, r] of releases.entries()) {
+    assert.equal(translated[i].kind, r.kind);
+    assert.equal(translated[i].title, HAN.test(r.title) ? english(r.title) : r.title);
+    assert.equal(translated[i].body.length, r.body.length);
+    assert.deepEqual(hanIn(JSON.stringify([translated[i].body, translated[i].feature])), []);
+  }
+
   const again = await translateEnglish(RUN);
   assert.equal(again.calls, 0, "nothing translated twice");
 });
@@ -514,6 +524,22 @@ test("v1, the Agent addresses and the MCP tools in English: English pages, the n
   assert.ok(HAN.test((await tool(MCP_TOOL_NAMES.hot, {})).content[0]!.text), "without lang it answers in Chinese");
 });
 
+test("a tool's Markdown and JSON see one set of stored translations", { skip: ENGLISH === null }, async () => {
+  let reads = 0;
+  const debug = sql.options.debug;
+  sql.options.debug = (_connection, query) => { if (/\bFROM\s+english_copy\b/i.test(query)) reads++; };
+  try {
+    const answer = await tool(MCP_TOOL_NAMES.story, { public_id: site.story, lang: "en" });
+    assert.ok(!answer.isError);
+    assert.ok(answer.content[0]!.text.includes(answer.structuredContent.story.title));
+    assert.equal(reads, 1, "a translation arriving between two reads could give the same story two titles");
+    await tool(MCP_TOOL_NAMES.story, { public_id: site.story });
+    assert.equal(reads, 1, "the Chinese tool answer does not need translations");
+  } finally {
+    sql.options.debug = debug;
+  }
+});
+
 test("the English pages' share images: articles, posters, issues, events, topics and pages in English, the Chinese ones as they were", { skip: ENGLISH === null }, async () => {
   const get = (url: string) => app.inject({ method: "GET", url });
   const card = await loadItemOgCard(site.a, "en");
@@ -533,7 +559,7 @@ test("the English pages' share images: articles, posters, issues, events, topics
     assert.notEqual(en.headers.etag, zh.headers.etag, `${path}: a card of its own`);
     assert.equal(en.headers["cache-control"], zh.headers["cache-control"], `${path}: its words are in English, so it keeps as long as the Chinese one`);
   }
-  assert.equal((await get("/og/en/pages/changelog.png")).statusCode, 404, "a page with no English edition has no English card");
+  assert.equal((await get("/og/en/pages/free-tokens.png")).statusCode, 404, "a page with no English edition has no English card");
   // An article whose words are not in English yet is kept a minute, so its card turns English soon after they are.
   const waiting = await report(await source(`等待翻译的媒体${T}`), { title: `还没翻译的报道${T}`, summary: "还没有英文的摘要。", reason: "还没有英文的理由。" });
   for (const path of [`/og/en/items/${waiting}.png`, `/og/en/posters/${waiting}.png`]) {
@@ -572,4 +598,50 @@ test("both searches and public clients match the translated wording, including w
   await sql`UPDATE publications SET suppress_original = true WHERE article_id = ${id}`;
   assert.equal((await get("/api/site/en/pool?q=coordinating+models")).total, 0);
   assert.deepEqual((await get("/api/v1/items?mode=all&q=coordinating+models&lang=en")).items, []);
+});
+
+test("a historical daily with a renamed section still resolves English labels via section.key across all outlets without leaking key in v1 JSON", { skip: ENGLISH === null }, async () => {
+  const renamed = `改名栏目头条${T}`;
+  const renamedLead = `改名栏目导语${T}`;
+  const item = await report(await source(`Example Section ${T}`), { title: `改名栏目报道${T}`, summary: "改名栏目摘要。", reason: "改名栏目理由。" });
+  await translateEnglish(RUN);
+  const entry = { itemId: item, title: `改名栏目报道${T}`, summary: "改名栏目摘要。", sourceId: `sec-${T}`, sourceName: `Example Section ${T}`, sourceUrl: "https://example.com/sec", firstParty: false, role: "媒体" };
+  await sql`INSERT INTO reports (kind, key, window_start, window_end, content, generated_at) VALUES ('daily', '2099-01-04', now(), now(), ${sql.json({
+    lead: { title: renamed, leadParagraph: renamedLead },
+    highlights: [item],
+    sections: [
+      { key: "ai-models", label: "历史旧模型栏目", items: [entry] },
+      { label: "产品发布/更新", items: [entry] },
+    ],
+    flashes: [],
+    metrics: { totalEvents: 1 },
+  } as never)}, now())`;
+  for (const [zh, kind] of [[renamed, "headline"], [renamedLead, "text"]] as const) {
+    await sql`INSERT INTO english_copy (zh_hash, zh, kind, en) VALUES (${copyKey(zh)}, ${zh}, ${kind}, ${english(zh)})`;
+  }
+
+  const webDaily = await get("/api/site/en/reports/daily/2099-01-04");
+  assert.equal(webDaily.sections[0].label, "Model releases & updates");
+  assert.equal(webDaily.sections[1].label, "Product launches & updates");
+
+  const v1 = await get("/api/v1/dailies/2099-01-04?lang=en");
+  assert.equal(v1.report.sections[0].label, "Model releases & updates");
+  assert.equal(v1.report.sections[1].label, "Product launches & updates");
+  assert.equal("key" in v1.report.sections[0], false, "internal section key must not leak onto v1 JSON");
+
+  const agentMd = await text("/api/v1/agent/daily/2099-01-04?lang=en");
+  assert.ok(agentMd.includes("Model releases & updates"), agentMd);
+  assert.ok(agentMd.includes("Product launches & updates"), agentMd);
+  assert.ok(!agentMd.includes("历史旧模型栏目"));
+
+  const mcp = await tool(MCP_TOOL_NAMES.daily, { date: "2099-01-04", lang: "en" });
+  assert.ok(mcp.content[0]!.text.includes("Model releases & updates"));
+  assert.equal(mcp.structuredContent.report.sections[0].label, "Model releases & updates");
+  assert.equal("key" in mcp.structuredContent.report.sections[0], false);
+
+  const feed = await text("/en/feed/daily.xml");
+  const issueXml = feed.split("<item>").find((x) => x.includes("/en/daily/2099-01-04<")) ?? "";
+  assert.ok(issueXml.includes("Model releases &amp; updates"), issueXml);
+  assert.ok(issueXml.includes("Product launches &amp; updates"), issueXml);
+  assert.ok(!issueXml.includes("历史旧模型栏目"));
 });

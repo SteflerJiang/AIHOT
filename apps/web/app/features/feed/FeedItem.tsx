@@ -65,6 +65,7 @@ export const FeedItem = memo(function FeedItem({ item, group, filters, read = fa
             · {beijingTime(at)}
           </time>
         )}
+        {/* Every pick wears its badge, also in lists made only of picks (精选, a topic): the card looks the same wherever it appears. */}
         {item.selected && (
           <span className="hidden lg:inline-flex">
             {item.sameEvent ? <SameEventBadge /> : <SelectedBadge />}
@@ -78,7 +79,7 @@ export const FeedItem = memo(function FeedItem({ item, group, filters, read = fa
             <ScoreLabel score={item.score} compact />
           </span>
           <span className="-my-[11px] -mr-3 inline-flex lg:-my-1 lg:mr-0">
-            <StarButton item={item} className="size-11 lg:size-[26px]" />
+            <StarButton item={item} className="size-11 lg:size-[26px] lg:touch:before:absolute lg:touch:before:-inset-[9px] lg:touch:before:content-['']" />
           </span>
         </span>
       </header>

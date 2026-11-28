@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { useLocation } from "react-router";
 import { IntentLink } from "../ui/IntentLink";
 import { useContainedScroll } from "../ui/Page";
 import { SITE } from "@aihot/site";
 import { RingMark, Wordmark } from "@aihot/site/brand/Logo.tsx";
-import { useChangelogSeen } from "../../lib/local-state";
+import { useHydrated } from "../../lib/hydration";
+import { getReadIds, setChangelogSeen, useChangelogSeen } from "../../lib/local-state";
 import { activeSidebarItem, rail, railIsActive, sidebar, type NavItem } from "./nav";
 import { useScreen } from "./screens";
 import { MoreMenu } from "./MoreMenu";
@@ -13,14 +14,20 @@ import { IconGithub } from "../icons";
 import { Link } from "../../lib/link";
 import { pagePath, useLocale, useT } from "../../lib/i18n";
 
-/** True while the changelog has an entry newer than the one this reader last opened; never on English pages, which have no changelog. */
+/**
+ * True while the changelog has an entry newer than the one this reader last opened. A first visit (nothing read in
+ * this browser yet) counts from now: everything is new to a first-time reader, so the dot would only say "unread"
+ * about the site itself; it lights for the updates that come after. A returning reader who never opened the
+ * changelog still sees it.
+ */
 export function useChangelogDot(latestVersion: string | null): boolean {
   const seen = useChangelogSeen();
-  const english = useLocale() === "en";
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
-  if (!mounted || !latestVersion || english) return false;
-  return !seen || seen < latestVersion;
+  const mounted = useHydrated();
+  useEffect(() => {
+    if (mounted && latestVersion && !seen && getReadIds().length === 0) setChangelogSeen(latestVersion);
+  }, [mounted, latestVersion, seen]);
+  if (!mounted || !latestVersion) return false;
+  return seen ? seen < latestVersion : getReadIds().length > 0;
 }
 
 function SideLink({ item, dot, active }: { item: NavItem; dot: boolean; active: boolean }) {
@@ -30,7 +37,7 @@ function SideLink({ item, dot, active }: { item: NavItem; dot: boolean; active: 
     <IntentLink
       to={item.to}
       aria-current={active ? "page" : undefined}
-      className={`flex h-10 items-center gap-2.5 rounded-control px-2.5 text-ui-body-sm transition-colors duration-150 touch:h-11 ${
+      className={`flex h-10 items-center gap-2.5 rounded-control px-2.5 text-ui-body-sm transition-colors touch:h-11 ${
         active ? "bg-accent/10 font-semibold text-ink dark:bg-accent-soft" : "font-medium text-ink-3 hover:bg-bg-sunk hover:text-ink"
       }`}
     >
@@ -55,7 +62,7 @@ function Rail({ dot }: { dot: boolean }) {
   const { tab: screenTab, home } = useScreen();
   const [railRef, railOverscroll] = useContainedScroll<HTMLElement>();
   return (
-    <aside ref={railRef} className={`scrollbar-thin sticky top-0 hidden h-dvh w-16 shrink-0 flex-col items-center border-r border-line bg-sidebar px-1.5 pb-[max(14px,env(safe-area-inset-bottom))] pt-5 lg:flex wide:hidden short:overflow-y-auto short:pt-3 ${railOverscroll}`}>
+    <aside ref={railRef} className={`scrollbar-thin sticky top-0 z-30 hidden h-dvh w-16 shrink-0 flex-col items-center border-r border-line bg-sidebar px-1.5 pb-[max(14px,env(safe-area-inset-bottom))] pt-5 lg:flex wide:hidden short:overflow-y-auto short:pt-3 ${railOverscroll}`}>
       <Link to="/" className="mb-3 flex size-11 shrink-0 items-center justify-center text-accent short:mb-1" aria-label={t(`${SITE.name} 首页`, `${SITE.name} home`)}>
         <RingMark className="size-7" />
       </Link>
@@ -68,7 +75,7 @@ function Rail({ dot }: { dot: boolean }) {
               key={tab.key}
               to={tab.to}
               aria-current={on ? "page" : undefined}
-              className={`relative flex h-14 shrink-0 flex-col items-center justify-center gap-[3px] rounded-control text-ui-caption-sm transition-colors duration-150 short:h-12 ${
+              className={`relative flex h-14 shrink-0 flex-col items-center justify-center gap-[3px] rounded-control text-ui-caption-sm transition-colors short:h-12 ${
                 on ? "bg-accent/10 font-semibold text-ink dark:bg-accent-soft" : "font-medium text-ink-3 hover:bg-bg-sunk hover:text-ink"
               }`}
             >
@@ -109,7 +116,11 @@ export function Sidebar({ changelogVersion }: { changelogVersion: string | null 
             const lit = activeSidebarItem(section.items, pathname);
             return (
               <div key={section.key}>
-                <div className="px-2.5 pb-1 pt-3.5 text-ui-caption-sm text-ink-4">{t(section.title)}</div>
+                {section.title ? (
+                  <div className="px-2.5 pb-1 pt-3.5 text-ui-caption-sm text-ink-4">{t(section.title)}</div>
+                ) : (
+                  <div className="mx-2.5 mb-2 mt-3.5 border-t border-line" />
+                )}
                 <div className="flex flex-col gap-1">
                   {section.items.map((item) => (
                     <SideLink key={item.to} item={item} dot={dot} active={item.to === lit?.to} />

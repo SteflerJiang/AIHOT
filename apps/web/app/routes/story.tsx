@@ -1,26 +1,27 @@
+import { TopicLinks } from "../components/ui/TopicLinks";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { IntentLink } from "../components/ui/IntentLink";
 import { useLoaderData, useLocation } from "react-router";
 import type { Route } from "./+types/story";
 import { STORY_INDEX_MIN_SOURCES, type StoryDetail, type StoryReportView } from "@aihot/contracts/site";
-import { topicName } from "@aihot/contracts/taxonomy";
 import { SITE } from "@aihot/site";
 import { linkMentions } from "@aihot/contracts/mentions";
 import { addressRuns } from "@aihot/contracts/addresses";
 import { MentionText } from "../components/ui/MentionText";
 import { cachedPage, loadOr404, pagePathname } from "../lib/api.server";
 import { pageReuse } from "../lib/page-reuse";
-import { breadcrumbLd, pageMeta, storyArticleLd, storyLd, titled } from "../lib/seo";
+import { breadcrumbLd, pageMeta, storyArticleLd, storyLd, titled, titleCacheSeconds } from "../lib/seo";
 import { beijingDate, beijingTime } from "@aihot/contracts/time";
-import { byBeijingDay, monthDay, monthDayTime, relativeTime } from "../lib/format";
-import { useCurrentSection } from "../lib/motion";
+import { byBeijingDay, formatCount, monthDay, monthDayTime, relativeTime } from "../lib/format";
+import { useCurrentSection, useHeightTween, useSwapped } from "../lib/motion";
 import { HeatChart } from "../features/story/HeatChart";
 import { sessionCache } from "../lib/session-cache";
 import { isReload } from "../lib/restore";
 import { Badge, SelectedBadge } from "../components/ui/Badge";
 import { PillTabs } from "../components/ui/Tabs";
 import { Select } from "../components/ui/Controls";
-import { IconArrowLeft, IconCalendar, IconChevronRight, IconClock, IconDoc, IconUsers } from "../components/icons";
+import { IconCalendar, IconChevronRight, IconClock, IconDoc, IconUsers } from "../components/icons";
+import { BackLink } from "../components/shell/BackLink";
 import { PhoneBar } from "../components/shell/PhoneBar";
 import { hotInNav, navUp } from "../components/shell/nav";
 import type { Screen } from "../components/shell/screens";
@@ -35,8 +36,8 @@ export const { clientLoader, shouldRevalidate } = pageReuse<typeof loader>();
 
 export async function loader({ params, request }: Route.LoaderArgs) {
   const locale = localeOf(pagePathname(request));
-  const story = await loadOr404<StoryDetail>(apiIn(`/api/site/stories/${encodeURIComponent(params.publicId)}`, locale), { signal: request.signal, merged: (id) => localizePath(`/story/${id}`, locale) });
-  return cachedPage(300, { story });
+  const story = await loadOr404<StoryDetail>(apiIn(`/stories/${encodeURIComponent(params.publicId)}`, locale), { signal: request.signal, merged: (id) => localizePath(`/story/${id}`, locale) });
+  return cachedPage(titleCacheSeconds(300, locale, story.sourceCount >= STORY_INDEX_MIN_SOURCES ? story.title : null), { story });
 }
 
 export function meta({ loaderData, location }: Route.MetaArgs) {
@@ -74,8 +75,6 @@ const STATUS = {
 // Section anchors keep the old page's ids so shared links still land in the right place.
 const SECTIONS = { overview: "event-overview", reports: "event-reports", heat: "event-heat" } as const;
 
-const useIsoLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
-
 /** A main-column card: 17px title, 24px padding. */
 function Panel({ id, title, sub, right, children, className = "" }: { id?: string; title: ReactNode; sub?: ReactNode; right?: ReactNode; children: ReactNode; className?: string }) {
   return (
@@ -111,10 +110,12 @@ function TimelineRow({ r }: { r: StoryReportView }) {
   const [open, setOpen] = useState(false);
   const [clamped, setClamped] = useState(false);
   const ref = useRef<HTMLParagraphElement>(null);
-  useIsoLayoutEffect(() => {
+  // Against two of its lines, not the box's height, which a fold or unfold under way is still changing.
+  useLayoutEffect(() => {
     const el = ref.current;
-    if (el && !open) setClamped(el.scrollHeight > el.clientHeight + 1);
+    if (el && !open) setClamped(el.scrollHeight > 2 * parseFloat(getComputedStyle(el).lineHeight) + 1);
   }, [r.summary, open]);
+  useHeightTween(ref, open);
   return (
     <li className="grid gap-x-3 border-b border-line-soft py-4 last:border-b-0 lg:grid-cols-[48px_minmax(0,1fr)]">
       <time dateTime={r.publishedAt} className="mono text-ui-caption leading-[20px] text-ink-4">
@@ -134,7 +135,7 @@ function TimelineRow({ r }: { r: StoryReportView }) {
               <MentionText runs={addressRuns(r.summary)} />
             </p>
             {(clamped || open) && (
-              <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className="mt-1 text-ui-caption-lg text-note transition-colors hover:text-accent">
+              <button type="button" onClick={() => setOpen(!open)} aria-expanded={open} className={`mt-1 text-ui-caption-lg text-note transition-colors hover:text-accent ${HIT_BELOW}`}>
                 {open ? t("收起摘要", "Hide summary") : t("展开摘要", "Show summary")}
               </button>
             )}
@@ -144,6 +145,10 @@ function TimelineRow({ r }: { r: StoryReportView }) {
     </li>
   );
 }
+
+// Touch screens: a 44px hit area from a text button's top down into the space under it, not over the text above
+// (a summary's addresses are links).
+const HIT_BELOW = "relative touch:before:absolute touch:before:inset-x-0 touch:before:top-0 touch:before:h-11 touch:before:content-['']";
 
 type Filter = "all" | "official" | "selected";
 type Order = "desc" | "asc";
@@ -180,11 +185,20 @@ export default function StoryPage() {
     official: story.timeline.filter((r) => r.source.firstParty).length,
     selected: story.timeline.filter((r) => r.selected).length,
   };
+  // A filter with no reports is not offered, nor the switch when 全部 is all that is left; one restored from before
+  // (the timeline has changed since) shows them all.
+  const shown: Filter = counts[filter] > 0 ? filter : "all";
+  const resorted = useSwapped(`${shown}:${order}`);
+  const filters = [
+    { key: "all", label: t("全部报道", "All reports"), count: counts.all },
+    { key: "official", label: t("官方一手", "Official"), count: counts.official },
+    { key: "selected", label: t("精选报道", "Top picks"), count: counts.selected },
+  ].filter((f) => f.key === "all" || f.count > 0);
   const days = useMemo(() => {
-    const list = story.timeline.filter((r) => (filter === "official" ? r.source.firstParty : filter === "selected" ? r.selected : true));
+    const list = story.timeline.filter((r) => (shown === "official" ? r.source.firstParty : shown === "selected" ? r.selected : true));
     const sorted = [...list].sort((a, b) => (order === "desc" ? Date.parse(b.publishedAt) - Date.parse(a.publishedAt) : Date.parse(a.publishedAt) - Date.parse(b.publishedAt)));
     return byBeijingDay(sorted, (r) => r.publishedAt);
-  }, [story.timeline, filter, order]);
+  }, [story.timeline, shown, order]);
   const developments = useMemo(() => [...story.developments].sort((a, b) =>
     order === "desc" ? Date.parse(b.firstReportAt) - Date.parse(a.firstReportAt) : Date.parse(a.firstReportAt) - Date.parse(b.firstReportAt)
   ), [story.developments, order]);
@@ -208,21 +222,25 @@ export default function StoryPage() {
     setFilter("official");
     goSection(SECTIONS.reports);
   };
-
   return (
     <div className="mx-auto max-w-[var(--page-max-reading)] pb-10">
       <PhoneBar back={{ to: UP.to, label: UP.back }} title={story.title} />
       <nav aria-label={t("位置", "Breadcrumb")} className="hidden items-center gap-2.5 pb-5 pt-4 text-ui-caption text-ink-4 lg:flex">
-        <Link to={UP.to} className="inline-flex items-center gap-1.5 transition-colors hover:text-ink">
-          <IconArrowLeft size={15} /> {t(UP.name)}
-        </Link>
+        <BackLink
+          to={UP.to}
+          label={UP.name}
+          showPrevious={false}
+          iconSize={15}
+          className="relative inline-flex items-center gap-1.5 transition-colors hover:text-ink touch:before:absolute touch:before:inset-x-0 touch:before:top-1/2 touch:before:h-11 touch:before:-translate-y-1/2 touch:before:content-['']"
+        />
         <span className="h-3 w-px bg-line-strong" aria-hidden="true" />
         <span>{t("事件详情", "Story details")}</span>
       </nav>
 
       <header className="max-w-[960px] pt-3 lg:pt-0">
         <div className="flex items-center gap-2 text-ui-caption text-ink-4">
-          {t("热点事件", "Trending story")}
+          {/* A settled story is past, not trending: its badge alone says so. */}
+          {story.status !== "settled" && t("热点事件", "Trending story")}
           <Badge tone={status.tone}>{t(status.label)}</Badge>
         </div>
         <h1 data-page-title="" className="mt-2.5 text-ui-title-3 font-bold leading-[1.5] tracking-[-0.01em] text-ink lg:mt-3 lg:text-ui-display-2 lg:font-[730]">{story.title}</h1>
@@ -350,18 +368,18 @@ export default function StoryPage() {
               </Select>
             }
           >
-            <PillTabs
-              size="xs"
-              layoutId="story-report-filter"
-              label={t("报道筛选", "Filter reports")}
-              active={filter}
-              onSelect={(k) => setFilter(k as Filter)}
-              items={[
-                { key: "all", label: t("全部报道", "All reports"), count: counts.all },
-                { key: "official", label: t("官方一手", "Official"), count: counts.official },
-                { key: "selected", label: t("精选报道", "Top picks"), count: counts.selected },
-              ]}
-            />
+            {filters.length > 1 && (
+              <PillTabs
+                size="xs"
+                layoutId="story-report-filter"
+                label={t("报道筛选", "Filter reports")}
+                active={shown}
+                onSelect={(k) => setFilter(k as Filter)}
+                items={filters}
+              />
+            )}
+            {/* Another filter or order: the list it gives fades in where the last one was. */}
+            <div key={`${shown}:${order}`} className={resorted ? "anim-fade-in" : undefined}>
             {days.length === 0 ? (
               <p className="py-10 text-center text-ui-label text-ink-4">{t("这个筛选下没有报道。", "No reports match this filter.")}</p>
             ) : (
@@ -376,6 +394,7 @@ export default function StoryPage() {
                 </div>
               ))
             )}
+            </div>
             {story.reportCount > story.timeline.length && (
               <p className="pt-3 text-center text-ui-caption text-ink-4">
                 {t(<>显示最近 {story.timeline.length} 篇，共 {story.reportCount} 篇报道。</>, <>Showing the latest {story.timeline.length} of {story.reportCount} reports.</>)}
@@ -390,12 +409,13 @@ export default function StoryPage() {
           )}
 
           {story.related.length > 0 && (
-            <Panel title={t("关联事件", "Related stories")} className="order-6">
+            <Panel title={t("相关事件", "Related stories")} className="order-6">
               <ul className="-my-1 divide-y divide-line-soft">
                 {story.related.map((r) => (
                   <li key={r.publicId}>
                     <Link viewTransition to={`/story/${r.publicId}`} className="group flex items-baseline gap-3 py-3">
-                      <span className="shrink-0 text-ui-caption text-ink-4">{r.relation === "storyline" ? t("同一故事线", "Same storyline") : t("相关事件", "Related")}</span>
+                      {/* The panel says they are related; a row names only the closer tie. */}
+                      {r.relation === "storyline" && <span className="shrink-0 text-ui-caption text-ink-4">{t("同一故事线", "Same storyline")}</span>}
                       <span className="min-w-0 flex-1 text-ui-body-sm-plus font-medium text-ink-2 transition-colors group-hover:text-accent">{r.title}</span>
                       <IconChevronRight size={14} className="shrink-0 self-center text-ink-4" />
                     </Link>
@@ -416,9 +436,9 @@ export default function StoryPage() {
                     <b className="num font-semibold text-ink">{story.whyHot.newParticipants6h}</b> 个。
                   </>,
                   <>
-                    In the last 48 hours, <b className="num font-semibold text-ink">{story.whyHot.participants48h.toLocaleString("en-US")}</b>{" "}
+                    In the last 48 hours, <b className="num font-semibold text-ink">{formatCount(story.whyHot.participants48h, "en")}</b>{" "}
                     {story.whyHot.participants48h === 1 ? "account or organization" : "accounts or organizations"} covered or discussed this story,{" "}
-                    <b className="num font-semibold text-ink">{story.whyHot.newParticipants6h.toLocaleString("en-US")}</b> of them new in the last 6 hours.
+                    <b className="num font-semibold text-ink">{formatCount(story.whyHot.newParticipants6h, "en")}</b> of them new in the last 6 hours.
                   </>,
                 )}
               </p>
@@ -451,20 +471,16 @@ export default function StoryPage() {
                 ))}
               </ul>
               {counts.official > 0 && (
-                <button type="button" onClick={showOfficial} className="text-ui-caption text-ink-4 transition-colors hover:text-accent">
+                <button type="button" onClick={showOfficial} className={`text-ui-caption text-ink-4 transition-colors hover:text-accent ${HIT_BELOW}`}>
                   {t("在时间线筛选全部官方报道", "Show all official reports in the timeline")}
                 </button>
               )}
             </RailCard>
           )}
           {story.topics.length > 0 && (
-            <RailCard title={t("相关主题", "Related topics")}>
-              <div className="flex flex-wrap gap-1.5">
-                {story.topics.map((topic) => (
-                  <Link viewTransition key={topic.slug} to={`/topics/${topic.slug}`} className="chip">
-                    {topicName(topic.slug, topic.name, locale)}
-                  </Link>
-                ))}
+            <RailCard title={t("主题", "Topics")}>
+              <div className="flex flex-wrap gap-1.5 touch:gap-y-4.5">
+                <TopicLinks topics={story.topics} />
               </div>
             </RailCard>
           )}
